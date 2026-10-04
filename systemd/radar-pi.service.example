@@ -1,0 +1,14 @@
+[Unit]
+Description=GRISE IWR6843 Raspberry Pi Radar
+After=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+WorkingDirectory=/home/<USER>/radar_v123456789
+ExecStart=/home/<USER>/radar_v123456789/.venv/bin/python -m raspberry_pi.pi_radar_main
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

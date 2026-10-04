@@ -1,0 +1,53 @@
+# Raspberry Pi 5 radar runtime
+
+This adds a Linux-only entry point while preserving the Windows GUI and replay files. The Pi reuses `radar_gui_v1_ready.parse_frame` and `radar_processing.RadarProcessor`; no second processing algorithm exists.
+
+## Install
+
+```bash
+git clone https://github.com/jugonpark/radar_v123456789.git
+cd radar_v123456789
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv python3-tk git usbutils
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-pi.txt
+sudo usermod -aG dialout $USER
+python -m serial.tools.list_ports -v
+```
+
+The verified mapping is `/dev/ttyUSB0` Enhanced/CLI/115200 and `/dev/ttyUSB1` Standard/DATA/921600. The runtime prefers `/dev/radar_cli` and `/dev/radar_data`, then CP2105 VID `10c4` PID `ea70`, then USB fallback.
+
+## Run
+
+```bash
+python raspberry_pi/pi_radar_main.py
+python raspberry_pi/pi_radar_main.py --no-auto-port --cli-port /dev/ttyUSB0 --data-port /dev/ttyUSB1 --no-telemetry
+python raspberry_pi/pi_radar_gui.py
+```
+
+The default CFG is `profile_3d_aop.cfg`; pass `--cfg profile_3d_aop_robot_clutter_on.cfg` for the experimental profile. Object logs go to `./logs`; raw logging is off unless `--raw-log` is supplied. SSH sessions without `DISPLAY` should use headless mode.
+
+## Ports, udev and service
+
+```bash
+lsusb
+python -m serial.tools.list_ports -v
+udevadm info -a -n /dev/ttyUSB0
+sudo cp udev/99-iwr6843.rules.example /etc/udev/rules.d/99-iwr6843.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+ls -l /dev/radar_cli /dev/radar_data
+```
+
+Verify attributes before installing the example rule. For systemd, replace `<USER>` in `systemd/radar-pi.service.example`, copy it to `/etc/systemd/system/`, then explicitly run `sudo systemctl daemon-reload` and `sudo systemctl enable --now radar-pi.service`.
+
+## Runtime behavior
+
+Health states are `CONNECTING`, `CONFIGURING`, `OK`, `STALE`, `DISCONNECTED`, `CONFIG_ERROR`, and `ERROR`. Bad states clear target/risk and set `radar_valid=false`. Telemetry defaults to `127.0.0.1:8890`, maximum 10Hz, and contains no raw points. Processing and timeout calculations use `time.monotonic()`; wall time is used only for display/log timestamps.
+
+Run `bash scripts/setup_pi.sh` for the guided apt, dialout, venv and dependency setup. Tkinter is installed by apt, not pip.
+
+## Verification boundary
+
+`SOFTWARE_VERIFIED`: unit tests, mock serial lifecycle, port selection, telemetry schema/rate limit, stale/moving fail-safe, import and syntax checks. `HARDWARE_TEST_REQUIRED`: actual IWR6843 CLI responses, CP2105 interface labels, udev symlinks, 921600 DATA stream, USB reconnect, CPU/RAM load and motor integration.

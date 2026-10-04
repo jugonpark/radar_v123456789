@@ -1,0 +1,3 @@
+# CP2105 interface names can vary by kernel/driver. Verify with udevadm before installing.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea70", ATTRS{interface}=="*Enhanced*", SYMLINK+="radar_cli", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea70", ATTRS{interface}=="*Standard*", SYMLINK+="radar_data", GROUP="dialout", MODE="0660"
