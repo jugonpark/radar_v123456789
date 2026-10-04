@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+radar_gui_log_*.csv
+radar_objects_*.csv
+*.log
