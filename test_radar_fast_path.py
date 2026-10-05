@@ -47,6 +47,20 @@ class FastTests(unittest.TestCase):
             self.assertFalse(run(ds)[-1]["fast_path"]["candidate"])
         self.assertFalse(run([.7,.7,.7],angles=[0,5,10])[-1]["fast_path"]["candidate"])
 
+    def test_doppler_disagreement_is_diagnostic_not_veto(self):
+        r=run([.9,.8,.7],doppler=(.81,))[-1]
+        self.assertTrue(r["fast_path"]["candidate"])
+        self.assertIn("DOPPLER_DISAGREEMENT",r["fast_path"]["evidence"])
+        self.assertIn("DOPPLER_DISAGREEMENT",r["fast_path"]["reason"])
+
+    def test_five_sample_outlier_pairwise_median(self):
+        # One raised sample remains inside unchanged association gates;
+        # six clean pairwise slopes outweigh its four affected slopes.
+        o=run([.9,.8,.75,.6,.5])[-1]["objects"][0]
+        self.assertEqual(o["raw_distance_history_count"],5)
+        self.assertAlmostEqual(o["robust_range_rate"],1.0)
+        self.assertTrue(o["fast_approach_candidate"])
+
     def test_jitter_spike_no_trigger(self):
         self.assertFalse(run([.8,.79,.8,.65])[-1]["fast_path"]["candidate"])
 

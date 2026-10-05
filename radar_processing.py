@@ -477,6 +477,8 @@ class RadarProcessor:
             "RANGE_CLOSING": decrease >= s.fast_required_decrease_frames and -delta >= s.fast_min_total_closing_m,
             "FAST_RANGE_RATE": robust is not None and robust >= s.fast_min_range_rate_mps,
             "DISTANCE_RELEVANT": obj["raw_distance"] <= s.fast_max_distance_m,
+            # Baseline matching already bounds centroid jumps via
+            # track_match_distance_m; this adds a recent angular-span guard.
             "TRACK_STABLE": max(angles)-min(angles) <= s.fast_max_angle_jump_deg,
         }
         evidence.extend(k for k,v in mandatory.items() if v)
@@ -484,6 +486,10 @@ class RadarProcessor:
         if obj["point_count"] >= s.fast_min_points_for_strong_evidence: evidence.append("MULTI_POINT_SUPPORT")
         candidate = s.fast_path_mode != "OFF" and all(mandatory.values())
         reason = "OFF" if s.fast_path_mode == "OFF" else "FAST_APPROACH_EVIDENCE" if candidate else "MISSING:"+",".join(k for k,v in mandatory.items() if not v)
+        if candidate and obj["approach_doppler_median"] < -s.doppler_deadband_mps:
+            # Record disagreement, without making Doppler a hard veto.
+            evidence.append("DOPPLER_DISAGREEMENT")
+            reason += ";DOPPLER_DISAGREEMENT"
         obj.update(track_id=obj["id"], track_age_frames=track["age_frames"],
                    consecutive_hits=track["consecutive_hits"], misses=0,
                    centroid_x=obj["centroid"][0], centroid_y=obj["centroid"][1], centroid_z=obj["centroid"][2],
