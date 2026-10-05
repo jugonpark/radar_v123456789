@@ -46,10 +46,26 @@ class Settings:
     fast_min_points_for_strong_evidence: int = 2
     fast_max_angle_jump_deg: float = 15.0
 
+    # Independent OBSERVE-only approach decision; EXPERIMENTAL HARDWARE_TUNING_REQUIRED.
+    approach_path_mode: str = "OFF"
+    approach_min_track_frames: int = 3
+    approach_observe_max_distance_m: float = 1.2
+    approach_avoid_max_distance_m: float = .8
+    approach_speed_deadband_mps: float = .10
+    fast_approach_speed_mps: float = .50
+
     def validate(self):
         values = vars(self)
-        if any(not math.isfinite(float(v)) for k, v in values.items() if k != "fast_path_mode"):
+        if any(not math.isfinite(float(v)) for k, v in values.items() if k not in ("fast_path_mode", "approach_path_mode")):
             raise ValueError("Settings must be finite")
+        if self.approach_path_mode not in ("OFF", "OBSERVE"):
+            raise ValueError("Approach path supports OFF or OBSERVE only")
+        if type(self.approach_min_track_frames) is not int or self.approach_min_track_frames < 2:
+            raise ValueError("Approach minimum frames must be integer >= 2")
+        if not 0 < self.approach_avoid_max_distance_m <= self.approach_observe_max_distance_m:
+            raise ValueError("Approach distance gates must be positive and avoid <= observe")
+        if not 0 <= self.approach_speed_deadband_mps < self.fast_approach_speed_mps:
+            raise ValueError("Approach speed deadband must be nonnegative and below fast speed")
         if self.fast_path_mode not in ("OFF", "OBSERVE", "ENABLED"):
             raise ValueError("Invalid fast path mode")
         for name in ("fast_min_track_frames", "fast_history_samples", "fast_required_decrease_frames", "fast_min_points_for_strong_evidence"):
@@ -265,7 +281,7 @@ class RadarProcessor:
         result = dict(frame_id=frame_id, timestamp=now, robot_state=state,
                       processing="ACTIVE" if state == "MONITORING" else "PAUSED",
                       raw=raw, roi=[], clusters=[], objects=[], target=None, legacy_target=None,
-                      fast_path=self.fast_output(None), counts=counts)
+                      fast_path=self.fast_output(None), approach_decision=self.approach_output([]), counts=counts)
         if state != "MONITORING":
             self.tracks.clear()
             self.target_id = None
@@ -348,8 +364,82 @@ class RadarProcessor:
             counts[confidence.lower() + "_confidence"] = sum(o["confidence"] == confidence for o in objects)
         counts["targets"] = int(target is not None)
         counts["threats"] = sum(o["risk"] not in ("SAFE", "N/A") for o in objects)
+        approach_objects = []
+        for obj in objects:
+            obj["approach_decision"] = self.object_approach_decision(obj)
+            if obj.get("point_count", 0) > 0 and not obj.get("misses", 0):
+                approach_objects.append(obj["approach_decision"])
+        result["approach_decision"] = self.approach_output(approach_objects)
         result.update(roi=roi, clusters=clusters, objects=objects, target=target, legacy_target=legacy_target, fast_path=self.fast_output(fast))
         return result
+
+    def object_approach_decision(self, obj):
+        s = self.settings
+        distance = obj.get("raw_distance", obj.get("distance"))
+        speed = obj.get("robust_range_rate")
+        hits = obj.get("consecutive_hits", 0)
+        samples = obj.get("raw_distance_history_count", 0)
+        output = dict(state="UNKNOWN", avoid_candidate=False, track_id=obj.get("id"), distance_m=distance,
+                      approach_speed_mps=None, ttc_s=None, confidence="LOW", evidence=[], reason=[],
+                      track_frames=hits, history_samples=samples)
+        reasons, evidence = output["reason"], output["evidence"]
+        if s.approach_path_mode == "OFF":
+            reasons.append("OFF")
+            return output
+        if not obj.get("point_count", 0) or obj.get("misses", 0):
+            reasons.append("NO_CURRENT_OBSERVATION")
+            return output
+        if distance is None or not math.isfinite(distance):
+            reasons.append("INVALID_DISTANCE")
+            return output
+        if distance > min(s.max_range_m, s.approach_observe_max_distance_m):
+            output["state"] = "OUT_OF_RANGE"
+            reasons.append("OUTSIDE_OBSERVE_RANGE")
+            return output
+        if hits < s.approach_min_track_frames or samples < s.approach_min_track_frames or speed is None or not math.isfinite(speed):
+            reasons.append("INSUFFICIENT_CONTINUOUS_HISTORY")
+            return output
+        evidence.append("PERSISTENT_TRACK")
+        output.update(approach_speed_mps=speed, ttc_s=distance/speed if speed > 0 else None, confidence="MEDIUM")
+        if abs(speed) <= s.approach_speed_deadband_mps:
+            output["state"] = "IN_RANGE_STATIC"
+            reasons.append("RADIAL_SPEED_INSIGNIFICANT")
+        elif speed < -s.approach_speed_deadband_mps:
+            output["state"] = "RECEDING"
+            reasons.append("RANGE_INCREASING")
+        elif obj.get("distance_delta_total", 0) >= 0 or obj.get("consecutive_distance_decreases", 0) < min(2, s.approach_min_track_frames-1):
+            output["state"] = "UNKNOWN"
+            reasons.append("CLOSING_NOT_CONTINUOUS")
+        else:
+            evidence.append("CLOSING")
+            output["state"] = "FAST_APPROACH" if speed >= s.fast_approach_speed_mps else "SLOW_APPROACH"
+            if output["state"] == "FAST_APPROACH":
+                evidence.append("FAST_CLOSING")
+            if distance <= s.approach_avoid_max_distance_m:
+                evidence.append("IN_THREAT_RANGE")
+                output["avoid_candidate"] = output["state"] == "FAST_APPROACH"
+            doppler = obj.get("approach_doppler_median")
+            if doppler is not None and doppler > s.doppler_deadband_mps:
+                evidence.append("DOPPLER_SUPPORT")
+                output["confidence"] = "HIGH"
+            elif doppler is not None and doppler < -s.doppler_deadband_mps:
+                evidence.append("DOPPLER_DISAGREEMENT")
+            reasons.extend(evidence)
+        return output
+
+    def approach_output(self, objects):
+        s = self.settings
+        if s.approach_path_mode == "OFF":
+            objects = []
+        def priority(o):
+            rank = 0 if o["avoid_candidate"] else 1 if o["state"] == "FAST_APPROACH" else 2 if o["state"] == "SLOW_APPROACH" else 3
+            return rank, o["ttc_s"] if o["ttc_s"] is not None else math.inf, o["distance_m"] if o["distance_m"] is not None else math.inf, o["track_id"]
+        usable = [o for o in objects if o["state"] not in ("UNKNOWN", "OUT_OF_RANGE")]
+        primary = min(usable, key=priority, default=None)
+        avoid = bool(primary and primary["avoid_candidate"])
+        decision = "AVOID_CANDIDATE" if avoid else "WATCH" if primary and primary["state"] in ("FAST_APPROACH", "SLOW_APPROACH") else "SAFE"
+        return dict(mode=s.approach_path_mode, decision=decision, avoid_candidate=avoid, primary_object=primary,
+                    objects=objects, current_frame_valid=bool(usable), effective_observe_distance_m=min(s.max_range_m, s.approach_observe_max_distance_m))
 
     def match_objects(self, objects, now, counts=None):
         s = self.settings

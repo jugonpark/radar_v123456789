@@ -144,6 +144,8 @@ class RadarApp(tk.Tk):
         for f in fields(Settings):
             # Experimental Fast Path is configured through the Pi CLI; retain
             # the existing Windows settings layout and two-frame baseline flag.
+            if f.name in {"approach_path_mode", "approach_min_track_frames", "approach_observe_max_distance_m", "approach_avoid_max_distance_m", "approach_speed_deadband_mps", "fast_approach_speed_mps"}:
+                continue
             if f.name.startswith("fast_") and f.name != "fast_confidence_on_two_frames":
                 continue
             var = tk.StringVar(value=str(getattr(self.processor.settings, f.name)))

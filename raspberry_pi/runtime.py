@@ -25,13 +25,14 @@ except ImportError:
 
 HEALTH_BAD = {"STALE", "DISCONNECTED", "CONFIG_ERROR", "ERROR"}
 FAST_COLUMNS = ["track_age_frames", "consecutive_hits", "misses", "distance_history_count", "raw_distance_history_count", "instant_range_rate", "robust_range_rate", "distance_delta_total", "consecutive_distance_decreases", "consecutive_distance_increases", "angle_delta", "angle_stability", "raw_doppler_median", "approach_doppler_median", "fast_approach_candidate", "fast_approach_score", "fast_approach_reason", "legacy_target_selected"]
-OBJECT_COLUMNS = ["timestamp", "frame", "robot_state", "object_id", "confirmed", "persistence", "confidence", "motion_state", "direction_state", "point_count", "centroid_x", "centroid_y", "centroid_z", "distance", "raw_distance", "angle", "doppler_velocity", "approaching_point_ratio", "range_rate_velocity", "ttc", "ttc_velocity_source", "risk", "pending_reason", "target_selected"] + FAST_COLUMNS
+APPROACH_COLUMNS = ["approach_state", "approach_avoid_candidate", "approach_speed_mps", "approach_ttc_s", "approach_confidence", "approach_reason"]
+OBJECT_COLUMNS = ["timestamp", "frame", "robot_state", "object_id", "confirmed", "persistence", "confidence", "motion_state", "direction_state", "point_count", "centroid_x", "centroid_y", "centroid_z", "distance", "raw_distance", "angle", "doppler_velocity", "approaching_point_ratio", "range_rate_velocity", "ttc", "ttc_velocity_source", "risk", "pending_reason", "target_selected"] + FAST_COLUMNS + APPROACH_COLUMNS
 
 
 class RadarRuntime:
     def __init__(self, config=None, source_factory=RadarSerialSource, telemetry_factory=TelemetrySender,
                  motion_provider=None, no_auto_port=False, cli_override=None, data_override=None,
-                 telemetry_enabled=True, raw_logging=None, profile="BALANCED", diagnostic_logging=False, fast_settings=None):
+                 telemetry_enabled=True, raw_logging=None, profile="BALANCED", diagnostic_logging=False, fast_settings=None, approach_settings=None):
         self.config = config or PiConfig()
         self.source_factory, self.telemetry_factory = source_factory, telemetry_factory
         self.motion = motion_provider or RobotMotionProvider()
@@ -41,8 +42,13 @@ class RadarRuntime:
         self.profile = profile.upper()
         settings = settings_for(self.profile)
         for name, value in (fast_settings or {}).items():
-            if not name.startswith("fast_") or not hasattr(settings, name):
+            if name == "fast_approach_speed_mps" or not name.startswith("fast_") or not hasattr(settings, name):
                 raise ValueError(f"Unknown fast setting: {name}")
+            setattr(settings, name, value)
+        allowed_approach = {"approach_path_mode", "approach_min_track_frames", "approach_observe_max_distance_m", "approach_avoid_max_distance_m", "approach_speed_deadband_mps", "fast_approach_speed_mps"}
+        for name, value in (approach_settings or {}).items():
+            if name not in allowed_approach:
+                raise ValueError(f"Unknown approach setting: {name}")
             setattr(settings, name, value)
         settings.validate()
         self.processor = RadarProcessor(settings)
@@ -107,6 +113,8 @@ class RadarRuntime:
             result["target"] = None
         if moving:
             result["target"] = None
+        if self.health in HEALTH_BAD:
+            result["approach_decision"] = self.processor.approach_output([])
         if self.health == "OK":
             self._log(result, parsed, received_monotonic)
             self._send_telemetry(result, received_monotonic)
@@ -124,13 +132,16 @@ class RadarRuntime:
             result["target"] = None
             result["risk"] = "N/A"
             result["radar_valid"] = False
+            result["approach_decision"] = self.processor.approach_output([])
         return result
 
     def _log(self, result, parsed, now):
         wall = time.time()
         for obj in result["objects"]:
             x, y, z = obj["centroid"]
-            self.object_writer.writerow([wall, parsed["frame"], result["robot_state"], obj["id"], int(obj["confirmed"]), obj["persistence"], obj["confidence"], obj["motion_state"], obj["direction_state"], obj["point_count"], x, y, z, obj["distance"], obj["raw_distance"], obj["angle"], obj["doppler_velocity"], obj["approaching_point_ratio"], obj["range_rate_velocity"], obj["ttc"], obj["ttc_velocity_source"], obj["risk"], obj["pending_reason"], int(obj["target_selected"])] + [obj.get(k) for k in FAST_COLUMNS])
+            approach = obj.get("approach_decision", {})
+            approach_values = [approach.get(k) for k in ("state", "avoid_candidate", "approach_speed_mps", "ttc_s", "confidence")] + [";".join(approach.get("reason", []))]
+            self.object_writer.writerow([wall, parsed["frame"], result["robot_state"], obj["id"], int(obj["confirmed"]), obj["persistence"], obj["confidence"], obj["motion_state"], obj["direction_state"], obj["point_count"], x, y, z, obj["distance"], obj["raw_distance"], obj["angle"], obj["doppler_velocity"], obj["approaching_point_ratio"], obj["range_rate_velocity"], obj["ttc"], obj["ttc_velocity_source"], obj["risk"], obj["pending_reason"], int(obj["target_selected"])] + [obj.get(k) for k in FAST_COLUMNS] + approach_values)
         self.object_file.flush()
         if self.diagnostic_writer:
             c = result["counts"]
@@ -163,6 +174,7 @@ class RadarRuntime:
         target_out = None if target is None else {k: target.get(k) for k in ("id", "distance", "angle", "doppler_velocity", "range_rate_velocity", "confidence", "ttc", "risk")}
         payload = {"protocol_version": 1, "timestamp": time.time(), "frame": result["frame_id"], "radar_health": self.health, "radar_valid": self.health == "OK", "robot_state": result["robot_state"], "processing_state": result["processing"], "counters": result["counts"], "target": target_out}
         payload["fast_path"] = result.get("fast_path")
+        payload["approach_decision"] = result.get("approach_decision")
         self.telemetry.send(payload, now)
 
     def close(self):

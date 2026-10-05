@@ -1,4 +1,5 @@
 import json
+import csv
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -22,6 +23,39 @@ class FakeSource:
 
 
 class PiTests(unittest.TestCase):
+    def test_approach_independent_overrides_csv_and_telemetry(self):
+        root=Path(__file__).parent
+        log_dir=root/"logs"/"approach_runtime_test"
+        sock=FakeSocket()
+        runtime=RadarRuntime(PiConfig(log_dir=log_dir), source_factory=FakeSource,
+            telemetry_factory=lambda *args:TelemetrySender("h",1,sock=sock),
+            approach_settings={"fast_approach_speed_mps":.4}, fast_settings={"fast_min_range_rate_mps":100})
+        try:
+            runtime.health="OK"
+            for i,d in enumerate([.9,.8,.7]):
+                result=runtime.process(dict(frame=i+1,points=[dict(x=0,y=d,z=0,doppler=.81,snr=20)]),i*.1)
+            self.assertTrue(result["approach_decision"]["avoid_candidate"])
+            self.assertFalse(result["fast_path"]["candidate"])
+            self.assertTrue(sock.sent[-1][0]["approach_decision"]["avoid_candidate"])
+            with next(log_dir.glob("radar_objects_*.csv")).open(encoding="utf-8",newline="") as f:
+                rows=list(csv.DictReader(f))
+            self.assertEqual(rows[-1]["approach_state"],"FAST_APPROACH")
+            self.assertGreater(float(rows[-1]["approach_speed_mps"]),.4)
+            runtime.health="STALE"
+            cleared=runtime.process(dict(frame=4,points=[dict(x=0,y=.6,z=0,doppler=.81,snr=20)]),.3)
+            self.assertIsNone(cleared["approach_decision"]["primary_object"])
+            self.assertFalse(cleared["approach_decision"]["avoid_candidate"])
+        finally:
+            runtime.close()
+            for file in log_dir.iterdir():file.unlink()
+            log_dir.rmdir()
+
+    def test_approach_cli_overrides(self):
+        from raspberry_pi.pi_radar_main import build_parser
+        args=build_parser().parse_args(["--approach-path-mode","OBSERVE","--approach-fast-speed",".7","--approach-avoid-distance",".6"])
+        self.assertEqual(args.fast_approach_speed_mps,.7)
+        self.assertEqual(args.approach_avoid_max_distance_m,.6)
+
     def test_manual_and_fallback_ports(self):
         self.assertEqual(detect_ports(True).cli, "/dev/ttyUSB0")
         self.assertEqual(detect_ports(True, "/x", "/y"), RadarPorts("/x", "/y", "manual"))

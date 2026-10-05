@@ -29,6 +29,12 @@ def build_parser():
                        ("min-total-closing-m", float), ("required-decrease-frames", int), ("max-distance-m", float),
                        ("min-points-for-strong-evidence", int), ("max-angle-jump-deg", float)):
         p.add_argument("--fast-" + flag, type=kind, default=None, help="EXPERIMENTAL; HARDWARE_TUNING_REQUIRED")
+    p.add_argument("--approach-path-mode", choices=("OFF", "OBSERVE"), default=None)
+    p.add_argument("--approach-min-track-frames", type=int)
+    p.add_argument("--approach-observe-distance", type=float, dest="approach_observe_max_distance_m")
+    p.add_argument("--approach-avoid-distance", type=float, dest="approach_avoid_max_distance_m")
+    p.add_argument("--approach-speed-deadband", type=float, dest="approach_speed_deadband_mps")
+    p.add_argument("--approach-fast-speed", type=float, dest="fast_approach_speed_mps")
     return p
 
 
@@ -40,7 +46,8 @@ def main(argv=None):
     runtime = RadarRuntime(config, no_auto_port=args.no_auto_port, cli_override=args.cli_port, data_override=args.data_port,
                            telemetry_enabled=not args.no_telemetry, profile=args.profile,
                            diagnostic_logging=args.diag_log,
-                           fast_settings={k:v for k,v in vars(args).items() if k.startswith("fast_") and v is not None})
+                           fast_settings={k:v for k,v in vars(args).items() if k.startswith("fast_") and k != "fast_approach_speed_mps" and v is not None},
+                           approach_settings={k:v for k,v in vars(args).items() if (k.startswith("approach_") or k == "fast_approach_speed_mps") and v is not None})
     print(f"GRISE Radar Pi | profile={args.profile} CFG={config.cfg_path} CLI={runtime.cli_port} DATA={runtime.data_port} source={runtime.port_source} telemetry={not args.no_telemetry} raw={args.raw_log}")
     stopping = {"value": False}
     def stop_handler(_signum, _frame):
@@ -60,6 +67,9 @@ def main(argv=None):
                         target = 1 if result.get("target") else 0
                         c = result["counts"]
                         print(f"[RADAR] FPS={runtime.frame_count / max(now-runtime.start_monotonic, 1e-6):.1f} frame={parsed['frame']} health={runtime.health} raw={c['raw']} roi={c['roi']} moving={c['moving']} approach={c['approaching']} clusters={c['clusters']} tentative={c['tentative']} confirmed={c['confirmed']} target={target} risk={result['target']['risk'] if result.get('target') else 'N/A'}")
+                        primary = result["approach_decision"]["primary_object"]
+                        if primary:
+                            print(f"[APPROACH] track={primary['track_id']} d={primary['distance_m']:.2f}m v={primary['approach_speed_mps']:+.2f}m/s state={primary['state']} avoid={int(primary['avoid_candidate'])}")
                         if args.verbose:
                             print(f"[RADAR DIAG] range_drop={c['reject_range']} fov_drop={c['reject_fov']} snr_drop={c['reject_snr']} snr_missing={c['snr_missing']} snr_min/med/max={c['snr_min']}/{c['snr_median']}/{c['snr_max']} static={c['static']} recede={c['receding']} single={c['single_point_clusters']} matched={c['track_matched']} new={c['track_new']} high={c['high_confidence']}")
                         last_report = now

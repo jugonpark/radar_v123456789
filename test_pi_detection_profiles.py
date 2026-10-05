@@ -9,6 +9,15 @@ def point(distance, doppler=-.81, snr=12, x=0):
 
 
 class DetectionProfileTests(unittest.TestCase):
+    def test_approach_profile_modes_preserve_legacy_ranges(self):
+        self.assertEqual(settings_for("STRICT").approach_path_mode,"OFF")
+        for profile in ("BALANCED","DIAGNOSTIC"):
+            settings=settings_for(profile)
+            self.assertEqual(settings.approach_path_mode,"OBSERVE")
+            self.assertEqual(settings.max_range_m,1.5)
+            self.assertEqual(settings.approach_observe_max_distance_m,1.2)
+            self.assertEqual(settings.approach_avoid_max_distance_m,.8)
+
     def test_single_point_is_candidate_not_instant_target(self):
         processor = RadarProcessor(settings_for("BALANCED"))
         first = processor.process_frame(1, [point(.8)], 0)
