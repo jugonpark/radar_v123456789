@@ -142,6 +142,10 @@ class RadarApp(tk.Tk):
         scroll.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
         for f in fields(Settings):
+            # Experimental Fast Path is configured through the Pi CLI; retain
+            # the existing Windows settings layout and two-frame baseline flag.
+            if f.name.startswith("fast_") and f.name != "fast_confidence_on_two_frames":
+                continue
             var = tk.StringVar(value=str(getattr(self.processor.settings, f.name)))
             self.settings_vars[f.name] = var
             row = ttk.Frame(inside)
@@ -189,7 +193,7 @@ class RadarApp(tk.Tk):
 
     def _apply(self):
         try:
-            values = {}
+            values = dict(vars(self.processor.settings))
             integer = {"approach_sign", "min_cluster_points", "temporal_window", "temporal_required", "target_release_misses"}
             boolean = {"require_snr", "diagnostic_only", "target_requires_threat", "cluster_before_direction", "fast_confidence_on_two_frames"}
             for name, var in self.settings_vars.items():

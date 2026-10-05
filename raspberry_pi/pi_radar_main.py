@@ -24,6 +24,11 @@ def build_parser():
     p.add_argument("--raw-log", action="store_true"); p.add_argument("--verbose", action="store_true")
     p.add_argument("--diag-log", action="store_true", help="write one diagnostic CSV row per frame")
     p.add_argument("--profile", choices=("BALANCED", "STRICT", "DIAGNOSTIC"), default="BALANCED")
+    p.add_argument("--fast-path-mode", choices=("OFF", "OBSERVE", "ENABLED"), default=None)
+    for flag, kind in (("min-track-frames", int), ("history-samples", int), ("min-range-rate-mps", float),
+                       ("min-total-closing-m", float), ("required-decrease-frames", int), ("max-distance-m", float),
+                       ("min-points-for-strong-evidence", int), ("max-angle-jump-deg", float)):
+        p.add_argument("--fast-" + flag, type=kind, default=None, help="EXPERIMENTAL; HARDWARE_TUNING_REQUIRED")
     return p
 
 
@@ -34,7 +39,8 @@ def main(argv=None):
                       telemetry_port=args.telemetry_port, telemetry_hz=args.telemetry_hz, raw_logging=args.raw_log)
     runtime = RadarRuntime(config, no_auto_port=args.no_auto_port, cli_override=args.cli_port, data_override=args.data_port,
                            telemetry_enabled=not args.no_telemetry, profile=args.profile,
-                           diagnostic_logging=args.diag_log)
+                           diagnostic_logging=args.diag_log,
+                           fast_settings={k:v for k,v in vars(args).items() if k.startswith("fast_") and v is not None})
     print(f"GRISE Radar Pi | profile={args.profile} CFG={config.cfg_path} CLI={runtime.cli_port} DATA={runtime.data_port} source={runtime.port_source} telemetry={not args.no_telemetry} raw={args.raw_log}")
     stopping = {"value": False}
     def stop_handler(_signum, _frame):
