@@ -7,6 +7,19 @@ from tools.replay_radar_capture import load_capture, replay
 
 
 class ReplayTests(unittest.TestCase):
+    def test_replay_new_approach_settings_independent_of_v2(self):
+        from dataclasses import replace
+        from raspberry_pi.profiles import settings_for
+        rows=[dict(scenario="S",frame=i+1,timestamp=i*.1,points=[dict(x=0,y=d,z=0,doppler=.81,snr=20)]) for i,d in enumerate([.9,.8,.7,.6])]
+        settings=replace(settings_for("BALANCED"),fast_min_range_rate_mps=100,fast_approach_speed_mps=.5)
+        scenes,diagnostics=replay(rows,{},settings)
+        summary=scenes[0]["full_capture"]
+        self.assertEqual(summary["fast_candidate_fraction"],0)
+        self.assertGreater(summary["avoid_candidate_frame_fraction"],0)
+        self.assertEqual(diagnostics[-1]["approach_state"],"FAST_APPROACH")
+        suppressed,_=replay(rows,{},replace(settings,approach_avoid_max_distance_m=.5))
+        self.assertEqual(suppressed[0]["full_capture"]["avoid_candidate_frame_fraction"],0)
+
     def test_duplicate_empty_receive_events_are_preserved(self):
         with report_directory() as directory:
             run=Path(directory)/"run";run.mkdir()

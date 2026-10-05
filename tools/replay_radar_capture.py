@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from radar_processing import RadarProcessor
 from raspberry_pi.profiles import settings_for
-from tools.radar_track_analysis import TrackAnalysis, TRACK_COLUMNS, track_csv_row, false_positive_diagnostics, scenario_assessment
+from tools.radar_track_analysis import TrackAnalysis, TRACK_COLUMNS, track_csv_row, false_positive_diagnostics, scenario_assessment, add_approach_arguments, apply_approach_arguments, approach_false_positive_diagnostics
 
 
 def load_capture(path, scenarios=None, expected_frame_period=None):
@@ -88,7 +88,7 @@ def replay(rows, metadata, settings, action_window=2.0):
         legacy = result.get("legacy_target", result.get("target"))
         diagnostics.extend(track_csv_row(name, "ACTION" if in_action else "HOLD", row["frame"], timestamp, obj, legacy) for obj in result["objects"])
     return [dict(name=name, timing=timing[name], full_capture=full[name].summary(), action_window=action[name].summary(),
-                 false_positive_diagnostics=false_positive_diagnostics(name, full[name]), scenario_assessment=scenario_assessment(name, action[name].summary())) for name in full], diagnostics
+                 false_positive_diagnostics=false_positive_diagnostics(name, full[name]), approach_false_positive_diagnostics=approach_false_positive_diagnostics(name,full[name]), scenario_assessment=scenario_assessment(name, action[name].summary())) for name in full], diagnostics
 
 
 def main(argv=None):
@@ -99,6 +99,9 @@ def main(argv=None):
     parser.add_argument("--profile", choices=["STRICT", "BALANCED", "DIAGNOSTIC"], default="BALANCED")
     parser.add_argument("--action-window", type=float, default=2.0)
     parser.add_argument("--compare-fast-range-rates")
+    parser.add_argument("--compare-approach-fast-speeds")
+    parser.add_argument("--compare-approach-avoid-distances")
+    add_approach_arguments(parser)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "logs/replay")
     options = {"fast-min-range-rate":("fast_min_range_rate_mps", float), "fast-min-track-frames":("fast_min_track_frames", int),
         "fast-min-total-closing":("fast_min_total_closing_m", float), "fast-required-decrease-frames":("fast_required_decrease_frames", int),
@@ -118,6 +121,7 @@ def main(argv=None):
                 if not math.isfinite(value) or value <= 0:
                     raise ValueError(f"{option} must be positive and finite")
                 setattr(settings, field, value)
+        apply_approach_arguments(settings,args)
         evaluated_settings = asdict(settings)
         scenes, diagnostics = replay(rows, metadata, settings, args.action_window)
         comparisons = []
@@ -128,11 +132,20 @@ def main(argv=None):
                 settings.fast_min_range_rate_mps = threshold
                 compared, _ = replay(rows, metadata, settings, args.action_window)
                 comparisons.append(dict(threshold=threshold, action_window_fractions={s["name"]:s["action_window"]["fast_candidate_fraction"] for s in compared}, full_capture_fractions={s["name"]:s["full_capture"]["fast_candidate_fraction"] for s in compared}))
+        approach_comparisons = []
+        for axis,values in (("fast_approach_speed_mps",args.compare_approach_fast_speeds),("approach_avoid_max_distance_m",args.compare_approach_avoid_distances)):
+            if values:
+                for value in map(float,values.split(",")):
+                    compared_settings = type(settings)(**evaluated_settings)
+                    setattr(compared_settings,axis,value)
+                    compared_settings.validate()
+                    compared,_ = replay(rows,metadata,compared_settings,args.action_window)
+                    approach_comparisons.append(dict(parameter=axis,value=value,scenarios={s["name"]:{phase:{k:s[phase][k] for k in ("fast_approach_frame_fraction","avoid_candidate_frame_fraction","max_approach_speed_mps","first_fast_approach_latency","first_avoid_candidate_latency")} for phase in ("full_capture","action_window")} for s in compared}))
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report = dict(validation="OFFLINE ALGORITHM EVALUATION", hardware_status="HARDWARE_TEST_REQUIRED", frames=len(rows), warnings=warnings,
-                  profile=args.profile, settings=evaluated_settings, scenarios=scenes, comparisons=comparisons, note="No sensor validation inferred; EXPERIMENTAL HARDWARE_TUNING_REQUIRED; no best threshold selected")
+                  profile=args.profile, settings=evaluated_settings, scenarios=scenes, comparisons=comparisons, approach_comparisons=approach_comparisons, note="No sensor validation inferred; EXPERIMENTAL HARDWARE_TUNING_REQUIRED; no best threshold selected")
     (args.output_dir/"summary.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     with (args.output_dir/"track_diagnostics.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=TRACK_COLUMNS)
@@ -142,9 +155,10 @@ def main(argv=None):
     for scene in scenes:
         for phase in ("full_capture", "action_window"):
             s = scene[phase]
-            lines.append(f"{scene['name']} {phase}: legacy_target={s['legacy_target_fraction']:.3%} legacy_high={s['legacy_high_fraction']:.3%} fast={s['fast_candidate_fraction']:.3%} latency={s['first_detection_latency_from_action_start']} timing={scene['timing']['source']}")
-        lines.extend(json.dumps(d) for d in scene["false_positive_diagnostics"])
+            lines.append(f"{scene['name']} {phase}: legacy_target={s['legacy_target_fraction']:.3%} legacy_high={s['legacy_high_fraction']:.3%} fast={s['fast_candidate_fraction']:.3%} latency={s['first_detection_latency_from_action_start']} timing={scene['timing']['source']} approach_fast={s['fast_approach_frame_fraction']:.3%} avoid={s['avoid_candidate_frame_fraction']:.3%} max_speed={s['max_approach_speed_mps']} first_fast={s['first_fast_approach_latency']} first_avoid={s['first_avoid_candidate_latency']}")
+        lines.extend(json.dumps(d) for d in scene["false_positive_diagnostics"]+scene["approach_false_positive_diagnostics"])
     lines.extend(json.dumps(c) for c in comparisons)
+    lines.extend(json.dumps(c) for c in approach_comparisons)
     text = "\n".join(lines)
     (args.output_dir/"test_report.txt").write_text(text, encoding="utf-8")
     print(text)

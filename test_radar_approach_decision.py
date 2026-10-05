@@ -11,6 +11,37 @@ def run(distances, doppler=(-.81,.81), **overrides):
 
 
 class ApproachDecisionTests(unittest.TestCase):
+    def test_primary_ties_deterministic_ttc_range_id(self):
+        import itertools
+        p=RadarProcessor(settings_for("BALANCED"))
+        base=dict(state="FAST_APPROACH",avoid_candidate=True,confidence="MEDIUM",evidence=[],reason=[],track_frames=3,history_samples=3)
+        candidates=[dict(base,track_id=3,distance_m=.6,approach_speed_mps=.6,ttc_s=1),
+                    dict(base,track_id=2,distance_m=.5,approach_speed_mps=.5,ttc_s=1),
+                    dict(base,track_id=1,distance_m=.5,approach_speed_mps=.5,ttc_s=1)]
+        for order in itertools.permutations(candidates):
+            self.assertEqual(p.approach_output(list(order))["primary_object"]["track_id"],1)
+        candidates[0]["ttc_s"]=.8
+        self.assertEqual(p.approach_output(candidates)["primary_object"]["track_id"],3)
+
+    def test_unmatched_new_track_history_and_all_existing_fields(self):
+        p=RadarProcessor(settings_for("BALANCED"))
+        first=p.process_frame(1,cloud(.9),0)
+        p.process_frame(2,cloud(.8),.1)
+        changed=p.process_frame(3,cloud(.7,angle=50),.2)
+        obj=changed["objects"][0]
+        self.assertNotEqual(obj["id"],first["objects"][0]["id"])
+        self.assertEqual(obj["approach_decision"]["history_samples"],1)
+        self.assertEqual(obj["approach_decision"]["state"],"UNKNOWN")
+        off=run([.9,.8,.7,.6],approach_path_mode="OFF",doppler=(-.81,))
+        observed=run([.9,.8,.7,.6],approach_path_mode="OBSERVE",doppler=(-.81,))
+        def strip(value):
+            if isinstance(value,dict):return {k:strip(v) for k,v in value.items() if k!="approach_decision"}
+            if isinstance(value,list):return [strip(v) for v in value]
+            return value
+        for a,b in zip(off,observed):
+            for name in ("objects","counts","target","legacy_target","fast_path"):
+                self.assertEqual(strip(a[name]),strip(b[name]))
+
     def primary(self,distances,**settings):
         return run(distances,**settings)[-1]["approach_decision"]["primary_object"]
 

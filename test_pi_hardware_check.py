@@ -30,6 +30,20 @@ def report_directory():
 
 
 class HardwareCheckTests(unittest.TestCase):
+    def test_approach_test_runs_four_scenes_in_observe_without_hardware(self):
+        source=MagicMock(configuration_complete=True)
+        source.command_results=[dict(command="sensorStart",status="DONE",response="Done")]
+        source.stream_stats=dict(parsed_frames=4)
+        source.parse_seconds=[.0001]
+        source.frames.return_value=[(dict(frame=1,points=[]),1.0)]
+        with report_directory() as directory, patch("tools.pi_radar_hardware_check.RadarSerialSource",return_value=source), patch("builtins.input",return_value=""), patch("tools.pi_radar_hardware_check.time.sleep"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--cli-port","a","--data-port","b","--approach-test","--approach-path-mode","OFF","--duration",".01","--output-dir",directory]),0)
+            report=json.loads((next(Path(directory).iterdir())/"summary.json").read_text())
+            self.assertEqual([s["name"] for s in report["scenarios"]],["SCENE_0_EMPTY","SCENE_3_FAST_APPROACH","SCENE_4_RECEDE","SCENE_5_SIDE_MOTION"])
+            self.assertEqual(report["approach_path_mode"],"OBSERVE")
+            self.assertEqual(report["approach_speed_check"]["status"],"UNKNOWN")
+            self.assertEqual(report["fast_approach_check"]["status"],"UNKNOWN")
+
     def test_fast_verdict_requires_complete_scenarios_and_capture(self):
         scenes=[dict(name=name, capture_complete=True, action_window=dict(frames=20,fast_candidate_fraction=.1 if name=="SCENE_3_FAST_APPROACH" else 0,
                     legacy_target_fraction=0), false_positive_diagnostics=[], scenario_assessment=dict(status="PASS")) for name,_ in SCENARIOS]

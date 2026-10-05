@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.radar_track_analysis import TrackAnalysis, TRACK_COLUMNS, track_csv_row, false_positive_diagnostics, scenario_assessment
+from tools.radar_track_analysis import TrackAnalysis, TRACK_COLUMNS, track_csv_row, false_positive_diagnostics, scenario_assessment, add_approach_arguments, apply_approach_arguments, APPROACH_SCENE_NAMES, approach_check, approach_false_positive_diagnostics, approach_console
 from radar_processing import RadarProcessor
 from raspberry_pi.port_detection import detect_ports
 from raspberry_pi.profiles import settings_for
@@ -203,6 +203,8 @@ def main(argv=None):
     parser.add_argument("--expected-fps", type=float, help="Defaults to frameCfg period in CFG")
     parser.add_argument("--fps-tolerance", type=float, default=.2)
     parser.add_argument("--action-window", type=float, default=2.0)
+    parser.add_argument("--approach-test", action="store_true", help="Interactive EMPTY/APPROACH/RECEDE/SIDE in OBSERVE mode")
+    add_approach_arguments(parser)
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--raw-log", action="store_true")
@@ -234,6 +236,10 @@ def main(argv=None):
     same_port = Path(ports.cli).resolve() == Path(ports.data).resolve()
     source = RadarSerialSource(ports.cli, ports.data, args.cfg)
     settings = settings_for(args.profile)
+    if args.approach_test:
+        args.interactive = True
+        args.approach_path_mode = "OBSERVE"
+    apply_approach_arguments(settings,args)
     processor = RadarProcessor(settings)
     handles = []
     def writer(name, columns):
@@ -259,9 +265,10 @@ def main(argv=None):
         source.configure()
         cli_ok = port_ok = True
         print("CLI_CONFIG: PASS", Counter(r["status"] for r in source.command_results), "sent_commands=", len(source.command_results))
-        for name, instructions in SCENARIOS if args.interactive else [("UNLABELLED", "Observe current scene")]:
+        selected_scenes = [(n,i) for n,i in SCENARIOS if not args.approach_test or n in APPROACH_SCENE_NAMES]
+        for name, instructions in selected_scenes if args.interactive else [("UNLABELLED", "Observe current scene")]:
             if args.interactive:
-                input(f"\n{name}: {instructions}\nPress Enter when ready: ")
+                input(f"\n{'APPROACH' if args.approach_test and name == 'SCENE_3_FAST_APPROACH' else name}: {instructions}\nPress Enter when ready: ")
                 for number in (3, 2, 1):
                     print(number, flush=True)
                     time.sleep(1)
@@ -269,6 +276,7 @@ def main(argv=None):
             processor.reset()
             start_wall = datetime.now().isoformat()
             started = last_print = time.monotonic()
+            last_approach_print = started-.2
             print("ACTION_START", start_wall, started, flush=True)
             capture = Capture(name, started)
             action = Capture(name, started)
@@ -299,6 +307,9 @@ def main(argv=None):
                             raw.writerow([name, parsed["frame"], received, *[row.get(k) for k in raw_columns]])
                     if diag:
                         diag.writerow([name, parsed["frame"], received, *[result["counts"].get(k, 0) for k in STAGES], proc_ms])
+                    if finished-last_approach_print >= .2:
+                        print(approach_console(result["approach_decision"]))
+                        last_approach_print = finished
                     if finished-last_print >= 1:
                         last_print = finished
                         print(f"[HW] scene={name} frame={parsed['frame']} raw={len(parsed['points'])} target={int(result['target'] is not None)}")
@@ -311,6 +322,7 @@ def main(argv=None):
                 summary["action_window"] = action.tracks.summary()
                 summary["scenario_assessment"] = scenario_assessment(name, summary["action_window"])
                 summary["timing"] = dict(action_start_wall=start_wall, action_start_monotonic=started, source="RECORDED_ACTION_START", latency_scope="Scenario START, not actual hand motion onset")
+                summary["approach_false_positive_diagnostics"] = approach_false_positive_diagnostics(name, capture.tracks)
                 summary["false_positive_diagnostics"] = false_positive_diagnostics(name, capture.tracks)
                 moving = [d for d in capture.values["doppler"] if abs(d) > settings.doppler_deadband_mps]
                 summary["moving_doppler_median"] = statistics.median(moving) if moving else None
@@ -334,7 +346,8 @@ def main(argv=None):
     if cli_ok and any(r["status"] == "PROMPT" for r in source.command_results):
         report["checks"]["CLI CONFIG"] = "WARN"
         report["sensor_status"] = "NEEDS_RETEST"
-    report.update(timestamp=datetime.now().isoformat(), cfg=str(args.cfg), profile=args.profile,
+    report.update(timestamp=datetime.now().isoformat(), cfg=str(args.cfg), profile=args.profile, approach_path_mode=settings.approach_path_mode,
+                  approach_settings={k:v for k,v in vars(settings).items() if k.startswith("approach_") or k == "fast_approach_speed_mps"},
                   ports=metadata, interface_labels_verified=labels_verified,
                   expected_fps=expected, fps_tolerance=args.fps_tolerance,
                   stream=source.stream_stats, parse_ms=describe([v*1000 for v in source.parse_seconds]),
@@ -347,9 +360,12 @@ def main(argv=None):
                   latency_scope="Host parser + RadarProcessor only, excludes RF capture/UART transfer/logging; intervals measure host delivery.")
     if failure and (failure.startswith("KeyboardInterrupt") or report["frame_count"]):
         report["sensor_status"] = "NEEDS_RETEST"
+    report["approach_speed_check"] = approach_check(results, failure)
+    report["checks"]["APPROACH SPEED"] = report["approach_speed_check"]["status"]
     report["fast_approach_check"] = fast_check(results, failure)
     report["checks"]["FAST APPROACH"] = report["fast_approach_check"]["status"]
     report["check_reasons"] = {
+        "APPROACH SPEED": report["approach_speed_check"],
         "FAST APPROACH": report["fast_approach_check"],
         "USB/PORT": dict(interface_labels_verified=labels_verified, mapping=ports.source),
         "CLI CONFIG": dict(prompt_only_ack=sum(r["status"] == "PROMPT" for r in source.command_results), sent_commands=len(source.command_results), configuration_complete=cli_ok),
@@ -362,7 +378,7 @@ def main(argv=None):
         text += f"{scene['name']} scenario_assessment: {json.dumps(scene['scenario_assessment'])}\n"
         for phase in ("full_capture", "action_window"):
             text += f"{scene['name']} {phase}: {json.dumps(scene[phase])}\n"
-        for evidence in scene["false_positive_diagnostics"]:
+        for evidence in scene["false_positive_diagnostics"] + scene["approach_false_positive_diagnostics"]:
             text += json.dumps(evidence) + "\n"
     text += json.dumps(report, indent=2, allow_nan=False)
     (output/"summary.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")

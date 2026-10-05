@@ -188,3 +188,8 @@ reconnect remain HARDWARE_TEST_REQUIRED until the operator runs these procedures
 ## V2 track diagnostics and offline replay
 
 See [Track Fast Path V2](RADAR_FAST_PATH_V2.md) for Windows/Pi commands, recorded ACTION_START, full/action-window comparisons and offline threshold tables. Use `--action-window 2 --raw-log --diag-log` with the interactive checker. Thresholds are EXPERIMENTAL and HARDWARE_TUNING_REQUIRED; OBSERVE retains baseline targets. Replay does not validate sensor hardware.
+
+
+## Independent approach speed experiment
+
+See [Approach Speed Decision](RADAR_APPROACH_SPEED.md) for the exact Windows CMD/Pi four-scene `--approach-test`, distance-history speed thresholds and replay comparisons. Start with a strong metal reflector, then repeat with a hand. OBSERVE sends no motor commands and preserves legacy target/risk. SOFTWARE_VERIFIED and HARDWARE_TEST_REQUIRED remain separate.

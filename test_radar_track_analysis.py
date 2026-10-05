@@ -1,8 +1,30 @@
 import unittest
-from tools.radar_track_analysis import TrackAnalysis, false_positive_diagnostics, scenario_assessment
+from tools.radar_track_analysis import TrackAnalysis, false_positive_diagnostics, scenario_assessment, approach_check, APPROACH_SCENE_NAMES, approach_console
 
 
 class TrackAnalysisTests(unittest.TestCase):
+    def test_approach_shared_metrics_signed_primary_population(self):
+        a=TrackAnalysis(10)
+        for i,speed in enumerate([None,.7,-.5]):
+            primary=None if speed is None else dict(track_id=4,distance_m=.6,approach_speed_mps=speed,state="FAST_APPROACH" if speed>0 else "RECEDING",avoid_candidate=speed>0)
+            a.add(i,10+i*.1,dict(objects=[],target=None,counts={},approach_decision=dict(decision="AVOID_CANDIDATE" if speed and speed>0 else "SAFE",current_frame_valid=primary is not None,primary_object=primary,objects=[primary] if primary else [],avoid_candidate=bool(speed and speed>0))))
+        s=a.summary()
+        self.assertAlmostEqual(s["avoid_candidate_frame_fraction"],1/3)
+        self.assertAlmostEqual(s["approach_decision_frame_fraction"],1/3)
+        self.assertAlmostEqual(s["fast_approach_frame_fraction"],1/3)
+        self.assertAlmostEqual(s["median_approach_speed_mps"],.1)
+        self.assertAlmostEqual(s["first_fast_approach_latency"],.1)
+        self.assertEqual(s["primary_track_id"],4)
+        self.assertIn("v=N/A",approach_console({}))
+
+    def test_four_scene_approach_check_requires_complete_observations(self):
+        scenes=[dict(name=n,capture_complete=True,action_window=dict(frames=20,avoid_candidate_frame_fraction=.1 if n=="SCENE_3_FAST_APPROACH" else 0,receding_frame_fraction=.1 if n=="SCENE_4_RECEDE" else 0),approach_false_positive_diagnostics=[]) for n in APPROACH_SCENE_NAMES]
+        self.assertEqual(approach_check(scenes)["status"],"PASS")
+        self.assertEqual(approach_check(scenes[:-1])["status"],"UNKNOWN")
+        self.assertEqual(approach_check(scenes,"interrupted")["status"],"UNKNOWN")
+        scenes[0]["approach_false_positive_diagnostics"]=[{"range_rate":.7}]
+        self.assertEqual(approach_check(scenes)["status"],"WARN")
+
     def test_empty_capture_unknown_and_static_legacy_evidence_warns(self):
         a=TrackAnalysis()
         self.assertEqual(scenario_assessment("SCENE_0_EMPTY", a.summary())["status"],"UNKNOWN")
