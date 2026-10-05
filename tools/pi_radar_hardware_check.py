@@ -170,6 +170,22 @@ def classify(stream, scenarios, expected_fps, tolerance, cli_ok, port_ok, approa
                 note="Raw presence is not hand response validation. Target reliability requires repeated labelled trials; a single target is insufficient.")
 
 
+def fast_check(scenarios, failure=None):
+    indexed = {s["name"]:s for s in scenarios}
+    missing = [name for name,_ in SCENARIOS if name not in indexed]
+    empty = [s["name"] for s in scenarios if not s["action_window"].get("frames",0)]
+    incomplete = [s["name"] for s in scenarios if not s.get("capture_complete", False)]
+    complete = not missing and not empty and not incomplete and not failure
+    positive = any(s["name"] == "SCENE_3_FAST_APPROACH" and s["action_window"]["fast_candidate_fraction"] > 0 for s in scenarios)
+    contradictory = any(s["false_positive_diagnostics"] or s.get("scenario_assessment", {}).get("status") != "PASS" for s in scenarios)
+    return dict(status="UNKNOWN" if not complete else "PASS" if positive and not contradictory else "WARN",
+                reason="Requires complete six-scene nonempty action observations; repeated labelled hardware trials still required",
+                coverage=len(indexed), required_scenes=len(SCENARIOS), missing_scenes=missing, empty_action_windows=empty,
+                failure=failure, incomplete_captures=incomplete, scenarios={s["name"]:dict(frames=s["action_window"].get("frames",0),
+                    fast_fraction=s["action_window"]["fast_candidate_fraction"], legacy_fraction=s["action_window"]["legacy_target_fraction"],
+                    assessment=s.get("scenario_assessment")) for s in scenarios})
+
+
 class Deadline:
     def __init__(self, seconds):
         self.end = time.monotonic() + seconds
@@ -291,6 +307,7 @@ def main(argv=None):
             finally:
                 duration = time.monotonic()-started
                 summary = capture.summary(duration)
+                summary["capture_complete"] = duration >= args.duration
                 summary["action_window"] = action.tracks.summary()
                 summary["scenario_assessment"] = scenario_assessment(name, summary["action_window"])
                 summary["timing"] = dict(action_start_wall=start_wall, action_start_monotonic=started, source="RECORDED_ACTION_START", latency_scope="Scenario START, not actual hand motion onset")
@@ -330,7 +347,7 @@ def main(argv=None):
                   latency_scope="Host parser + RadarProcessor only, excludes RF capture/UART transfer/logging; intervals measure host delivery.")
     if failure and (failure.startswith("KeyboardInterrupt") or report["frame_count"]):
         report["sensor_status"] = "NEEDS_RETEST"
-    report["fast_approach_check"] = dict(status="PASS" if any(s["name"] == "SCENE_3_FAST_APPROACH" and s["action_window"]["fast_candidate_fraction"] > 0 for s in results) and not any(s["false_positive_diagnostics"] for s in results) else "WARN", reason="Track candidate evidence within recorded action window; requires repeated labelled hardware trials", scenarios={s["name"]:dict(fast_fraction=s["action_window"]["fast_candidate_fraction"], legacy_fraction=s["action_window"]["legacy_target_fraction"]) for s in results})
+    report["fast_approach_check"] = fast_check(results, failure)
     report["checks"]["FAST APPROACH"] = report["fast_approach_check"]["status"]
     report["check_reasons"] = {
         "FAST APPROACH": report["fast_approach_check"],
@@ -342,6 +359,7 @@ def main(argv=None):
     text = "=== RADAR HARDWARE VALIDATION ===\n" + "\n".join(f"{k:22} {v}\nreason: {json.dumps(report['check_reasons'].get(k, {'assessment':report['approach_sign_check']}))}" for k, v in report["checks"].items())
     text += f"\nSENSOR STATUS: {report['sensor_status']}\nPROCESSING STATUS: {report['processing_status']}\n"
     for scene in results:
+        text += f"{scene['name']} scenario_assessment: {json.dumps(scene['scenario_assessment'])}\n"
         for phase in ("full_capture", "action_window"):
             text += f"{scene['name']} {phase}: {json.dumps(scene[phase])}\n"
         for evidence in scene["false_positive_diagnostics"]:

@@ -24,32 +24,48 @@ def load_capture(path, scenarios=None, expected_frame_period=None):
         with scene_path.open(encoding="utf-8-sig", newline="") as f:
             metadata = {r["scenario"]: r for r in csv.DictReader(f)}
     frames = {}
+    rows = []
     warnings = []
+    def timestamp_for(row):
+        value = float(row["received_monotonic"]) if row.get("received_monotonic") else None
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Nonfinite receive timestamp")
+        return value
     if inventory.exists():
         with inventory.open(encoding="utf-8-sig", newline="") as f:
             for r in csv.DictReader(f):
-                key = (r["scenario"], int(r["frame"]))
-                frames[key] = dict(scenario=key[0], frame=key[1], timestamp=float(r["received_monotonic"]) if r.get("received_monotonic") else None, points=[])
+                key = (r["scenario"], int(r["frame"]), timestamp_for(r))
+                if key in frames:
+                    raise ValueError(f"Ambiguous duplicate inventory receive event: {key}")
+                entry = dict(scenario=key[0], frame=key[1], timestamp=key[2], points=[])
+                frames[key] = entry
+                rows.append(entry)
     else:
         warnings.append("MISSING_FRAME_INVENTORY: empty frames cannot be recovered; fractions may be biased")
     with raw.open(encoding="utf-8-sig", newline="") as f:
         for r in csv.DictReader(f):
-            key = (r.get("scenario", "UNLABELLED"), int(r["frame"]))
-            timestamp = float(r["received_monotonic"]) if r.get("received_monotonic") else None
-            if inventory.exists() and key not in frames:
-                raise ValueError(f"Raw frame absent from authoritative inventory: {key}")
-            entry = frames.setdefault(key, dict(scenario=key[0], frame=key[1], timestamp=timestamp, points=[]))
-            if timestamp is not None and entry["timestamp"] is not None and abs(timestamp-entry["timestamp"]) > 1e-6:
-                raise ValueError(f"Raw/inventory timestamp mismatch: {key}")
+            key = (r.get("scenario", "UNLABELLED"), int(r["frame"]), timestamp_for(r))
+            if inventory.exists():
+                if key not in frames:
+                    raise ValueError(f"Raw receive event absent from authoritative inventory: {key}")
+                entry = frames[key]
+            else:
+                if key not in frames:
+                    frames[key] = dict(scenario=key[0], frame=key[1], timestamp=key[2], points=[])
+                    rows.append(frames[key])
+                entry = frames[key]
             entry["points"].append({k:float(r[k]) for k in ("x", "y", "z", "doppler", "snr", "noise") if r.get(k)})
-    rows = list(frames.values())
-    if any(r["timestamp"] is None for r in rows):
+    missing = sum(r["timestamp"] is None for r in rows)
+    if missing and missing != len(rows):
+        raise ValueError("Mixed recorded/missing receive timestamps: reject rather than replace recorded timing")
+    if missing:
         if expected_frame_period is None or not math.isfinite(expected_frame_period) or expected_frame_period <= 0:
             raise ValueError("Missing receive timestamps: supply positive --expected-frame-period; no silent 10Hz assumption")
         warnings.append("SYNTHETIC_TIMING: explicit expected frame period replaces unavailable timestamps")
         for index, row in enumerate(rows):
             row["timestamp"] = index * expected_frame_period
-    rows.sort(key=lambda r:r["timestamp"])
+    if any(b["timestamp"] < a["timestamp"] for a, b in zip(rows, rows[1:])):
+        raise ValueError("Receive timestamps out of inventory order")
     return rows, metadata, warnings
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch, MagicMock
 
-from tools.pi_radar_hardware_check import Capture, classify, describe, sign_check, Deadline, main
+from tools.pi_radar_hardware_check import Capture, classify, describe, sign_check, Deadline, main, fast_check, SCENARIOS
 from tools.pi_radar_udp_probe import decode_packet, safe_view
 from raspberry_pi.serial_source import RadarSerialSource, MAGIC_WORD
 from raspberry_pi.profiles import settings_for
@@ -30,6 +30,18 @@ def report_directory():
 
 
 class HardwareCheckTests(unittest.TestCase):
+    def test_fast_verdict_requires_complete_scenarios_and_capture(self):
+        scenes=[dict(name=name, capture_complete=True, action_window=dict(frames=20,fast_candidate_fraction=.1 if name=="SCENE_3_FAST_APPROACH" else 0,
+                    legacy_target_fraction=0), false_positive_diagnostics=[], scenario_assessment=dict(status="PASS")) for name,_ in SCENARIOS]
+        self.assertEqual(fast_check(scenes)["status"],"PASS")
+        self.assertEqual(fast_check(scenes[:-1])["status"],"UNKNOWN")
+        self.assertEqual(fast_check(scenes,"KeyboardInterrupt")["status"],"UNKNOWN")
+        scenes[0]["capture_complete"]=False
+        self.assertEqual(fast_check(scenes)["status"],"UNKNOWN")
+        scenes[0]["capture_complete"]=True
+        scenes[0]["action_window"]["frames"]=0
+        self.assertEqual(fast_check(scenes)["status"],"UNKNOWN")
+
     def scene(self, name, distances, doppler):
         capture = Capture(name)
         processor = RadarProcessor(settings_for("BALANCED"))

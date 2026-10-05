@@ -14,13 +14,15 @@ class TrackAnalysis:
         self.action_start = action_start
         self.rows = defaultdict(list)
         self.frames = 0
+        self.receives = []
         self.fast_frames = self.high_frames = self.target_frames = 0
         self.fast_run = self.max_fast_run = 0
         self.new = self.matched = 0
 
     def add(self, frame, timestamp, result):
         self.frames += 1
-        objects = result.get("objects", [])
+        self.receives.append((frame, timestamp))
+        objects = [o for o in result.get("objects", []) if o.get("misses", 0) == 0 and o.get("point_count", 1) > 0]
         fast = any(o.get("fast_approach_candidate", False) for o in objects)
         self.fast_frames += fast
         self.high_frames += any(o.get("confidence") == "HIGH" for o in objects)
@@ -31,12 +33,25 @@ class TrackAnalysis:
         self.new += result.get("counts", {}).get("track_new", 0)
         self.matched += result.get("counts", {}).get("track_matched", 0)
         for obj in objects:
-            row = dict(obj, frame=frame, timestamp=timestamp)
+            row = dict(obj, frame=frame, timestamp=timestamp, receive_index=self.frames)
             row["legacy_target_selected"] = bool(legacy and legacy.get("id") == obj.get("id"))
             self.rows[obj.get("track_id", obj["id"])].append(row)
 
     def summary(self):
         tracks = []
+        intervals = sorted(b[1]-a[1] for a,b in zip(self.receives,self.receives[1:]) if b[1] > a[1])
+        cadence = statistics.median(intervals[:max(1, len(intervals)//2)]) if intervals else None
+        def continuous_lifetime(rows):
+            longest = run = 1
+            for a, b in zip(rows, rows[1:]):
+                delta = b["timestamp"]-a["timestamp"]
+                adjacent = (b["receive_index"] == a["receive_index"]+1 and
+                            ((b["frame"]-a["frame"]) & 0xffffffff) == 1 and delta > 0 and
+                            (cadence is None or delta <= cadence*3))
+                run = run+1 if adjacent else 1
+                longest = max(longest,run)
+            return longest
+
         for ident, rows in self.rows.items():
             distances = [r.get("raw_distance", r.get("distance")) for r in rows]
             distances = [v for v in distances if v is not None]
@@ -44,7 +59,7 @@ class TrackAnalysis:
             angles = [r.get("angle", 0) for r in rows]
             fast = [r for r in rows if r.get("fast_approach_candidate")]
             tracks.append(dict(track_id=ident, first_frame=rows[0]["frame"], last_frame=rows[-1]["frame"],
-                lifetime_frames=len(rows), first_distance=distances[0] if distances else None,
+                lifetime_frames=len(rows), max_continuous_lifetime=continuous_lifetime(rows), first_distance=distances[0] if distances else None,
                 minimum_distance=min(distances) if distances else None, maximum_distance=max(distances) if distances else None,
                 last_distance=distances[-1] if distances else None,
                 total_distance_change=distances[-1]-distances[0] if distances else 0,
@@ -63,7 +78,7 @@ class TrackAnalysis:
                 first_detection_latency_from_action_start=(fast[0]["timestamp"]-self.action_start) if fast and self.action_start is not None else None))
         first = min((t["fast_candidate_first_detection_time"] for t in tracks if t["fast_candidate_first_detection_time"] is not None), default=None)
         short = sum(t["lifetime_frames"] <= 2 for t in tracks)
-        return dict(tracks=tracks, longest_track=max(tracks, key=lambda t:t["lifetime_frames"], default=None),
+        return dict(frames=self.frames, tracks=tracks, longest_track=max(tracks, key=lambda t:t["lifetime_frames"], default=None),
             largest_closing_track=min(tracks, key=lambda t:t["total_distance_change"], default=None),
             fastest_closing_track=max(tracks, key=lambda t:t["robust_range_rate_max"] or 0, default=None),
             legacy_target_fraction=self.target_frames/self.frames if self.frames else 0,
@@ -73,7 +88,7 @@ class TrackAnalysis:
             fast_candidate_first_detection=first,
             first_detection_latency_from_action_start=first-self.action_start if first is not None and self.action_start is not None else None,
             max_consecutive_fast_frames=self.max_fast_run, track_new=self.new, matched=self.matched,
-            short_track_count=short, max_continuous_lifetime=max((t["lifetime_frames"] for t in tracks), default=0),
+            short_track_count=short, max_continuous_lifetime=max((t["max_continuous_lifetime"] for t in tracks), default=0),
             track_fragmentation_estimate=short/len(tracks) if tracks else None,
             fragmentation_note="Short-track fraction is an estimate, not hand identity ground truth.",
             diagnostics=["TRACK_MATCHING_MAY_BE_TOO_STRICT"] if self.new > self.matched and short > 2 else [])
@@ -101,6 +116,8 @@ def false_positive_diagnostics(name, analysis):
 
 def scenario_assessment(name, summary):
     """Label-consistent observed evidence, not accuracy certification."""
+    if not summary.get("frames", 0):
+        return dict(status="UNKNOWN", frames=0, reason="No observed action-window frames")
     tracks = summary["tracks"]
     closing = [t for t in tracks if t["lifetime_frames"] >= 2 and t["total_distance_change"] < -.02]
     increasing = [t for t in tracks if t["lifetime_frames"] >= 2 and t["total_distance_change"] > .02]
@@ -111,7 +128,7 @@ def scenario_assessment(name, summary):
     elif name == "SCENE_4_RECEDE":
         observed = bool(increasing) and summary["fast_candidate_fraction"] == 0
     else:
-        observed = summary["fast_candidate_fraction"] == 0
-    return dict(status="PASS" if observed else "WARN", closing_track_count=len(closing), increasing_track_count=len(increasing),
+        observed = summary["fast_candidate_fraction"] == 0 and summary["legacy_target_fraction"] == 0 and not closing
+    return dict(status="PASS" if observed else "WARN", frames=summary["frames"], closing_track_count=len(closing), increasing_track_count=len(increasing),
                 fast_candidate_fraction=summary["fast_candidate_fraction"], legacy_target_fraction=summary["legacy_target_fraction"],
                 scope="Scenario-labelled track evidence only; repeat trials and verify attribution")

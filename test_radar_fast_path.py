@@ -94,4 +94,23 @@ class FastTests(unittest.TestCase):
         for kwargs in ({"fast_path_mode":"AUTO"},{"fast_history_samples":1},{"fast_min_track_frames":1},{"fast_min_range_rate_mps":float("nan")}):
             with self.assertRaises(ValueError): replace(Settings(),**kwargs).validate()
 
+    def test_support_doppler_scores_more_than_disagreement(self):
+        supported=run([.9,.8,.7],doppler=(-.81,))[-1]["objects"][0]
+        opposed=run([.9,.8,.7],doppler=(.81,))[-1]["objects"][0]
+        self.assertTrue(supported["fast_approach_candidate"])
+        self.assertTrue(opposed["fast_approach_candidate"])
+        self.assertGreater(supported["fast_approach_score"],opposed["fast_approach_score"])
+
+    def test_fast_count_types_and_selected_snapshot_flag(self):
+        for name in ("fast_history_samples", "fast_min_track_frames", "fast_required_decrease_frames", "fast_min_points_for_strong_evidence"):
+            for value in (3.0, True):
+                with self.assertRaises(ValueError): replace(Settings(),**{name:value}).validate()
+        for mode in ("OBSERVE","ENABLED"):
+            outputs=run([.9,.8,.7,.6,.5],mode,doppler=(-.81,))
+            selected=[r for r in outputs if r["legacy_target"] is not None]
+            self.assertTrue(selected)
+            for result in selected:
+                self.assertTrue(result["legacy_target"]["legacy_target_selected"])
+                self.assertIsNot(result["legacy_target"], result["target"])
+
 if __name__=="__main__": unittest.main()

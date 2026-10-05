@@ -54,7 +54,7 @@ class Settings:
             raise ValueError("Invalid fast path mode")
         for name in ("fast_min_track_frames", "fast_history_samples", "fast_required_decrease_frames", "fast_min_points_for_strong_evidence"):
             value = getattr(self, name)
-            if int(value) != value or value < 1:
+            if type(value) is not int or value < 1:
                 raise ValueError("Fast path sample counts must be positive integers")
         if self.fast_history_samples < 2 or self.fast_min_track_frames < 2 or self.fast_required_decrease_frames >= self.fast_history_samples:
             raise ValueError("Fast path requires multiple samples and a sufficient history window")
@@ -327,9 +327,9 @@ class RadarProcessor:
                 objects.append(target)
         else:
             self.target_id = None
-        legacy_target = dict(target) if target else None
         for obj in objects:
             obj["legacy_target_selected"] = bool(target and obj["id"] == target["id"])
+        legacy_target = dict(target) if target else None
         candidates = [o for o in objects if o.get("fast_approach_candidate") and o["point_count"] > 0]
         fast = min(candidates, key=lambda o: o["raw_distance"] / o["robust_range_rate"], default=None)
         counts["fast_candidates"] = len(candidates)
@@ -499,5 +499,5 @@ class RadarProcessor:
                    consecutive_distance_decreases=decrease, consecutive_distance_increases=increase,
                    angle_delta=angle_delta, angle_stability=max(angles)-min(angles),
                    fast_approach_candidate=candidate, fast_approach_evidence=evidence,
-                   fast_approach_score=len(evidence), fast_approach_reason=reason,
+                   fast_approach_score=sum(e != "DOPPLER_DISAGREEMENT" for e in evidence), fast_approach_reason=reason,
                    legacy_target_selected=False)

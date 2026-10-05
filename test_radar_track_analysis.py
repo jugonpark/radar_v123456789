@@ -1,8 +1,30 @@
 import unittest
-from tools.radar_track_analysis import TrackAnalysis, false_positive_diagnostics
+from tools.radar_track_analysis import TrackAnalysis, false_positive_diagnostics, scenario_assessment
 
 
 class TrackAnalysisTests(unittest.TestCase):
+    def test_empty_capture_unknown_and_static_legacy_evidence_warns(self):
+        a=TrackAnalysis()
+        self.assertEqual(scenario_assessment("SCENE_0_EMPTY", a.summary())["status"],"UNKNOWN")
+        obj=dict(id=1,raw_distance=.7,angle=0)
+        a.add(1,0,dict(objects=[obj],target=obj,counts={}))
+        self.assertEqual(scenario_assessment("SCENE_1_STATIC_HAND",a.summary())["status"],"WARN")
+
+    def test_absent_frame_gap_and_temporal_gap_break_continuity(self):
+        obj=dict(id=1,raw_distance=.7,angle=0,point_count=1)
+        for sequence,expected in [([(1,0,True),(2,.1,False),(3,.2,True)],1),
+                                  ([(1,0,True),(3,.1,True)],1),
+                                  ([(1,0,True),(2,.1,True),(3,2,True)],2)]:
+            a=TrackAnalysis()
+            for frame,t,present in sequence:
+                a.add(frame,t,dict(objects=[obj] if present else [],target=None,counts={}))
+            self.assertEqual(a.summary()["max_continuous_lifetime"],expected)
+
+    def test_retained_missed_track_is_not_observed(self):
+        a=TrackAnalysis()
+        a.add(1,0,dict(objects=[dict(id=1,angle=0,misses=1,point_count=0)],target=None,counts={}))
+        self.assertEqual(a.summary()["tracks"],[])
+
     def test_fragmentation_and_comparison_and_false_positive(self):
         a = TrackAnalysis(1.0)
         for frame in range(4):

@@ -7,6 +7,26 @@ from tools.replay_radar_capture import load_capture, replay
 
 
 class ReplayTests(unittest.TestCase):
+    def test_duplicate_empty_receive_events_are_preserved(self):
+        with report_directory() as directory:
+            run=Path(directory)/"run";run.mkdir()
+            self.write(run/"raw_points.csv", ["scenario","frame","received_monotonic","x","y","z"], [["X",1,1.1,0,.7,0]])
+            self.write(run/"frame_diagnostics.csv", ["scenario","frame","received_monotonic"], [["X",1,1],["X",1,1.1],["X",2,1.2]])
+            rows,_,_=load_capture(run)
+            self.assertEqual([r["timestamp"] for r in rows],[1,1.1,1.2])
+            self.assertEqual([len(r["points"]) for r in rows],[0,1,0])
+
+    def test_ambiguous_nonfinite_and_mixed_timing_rejected(self):
+        with report_directory() as directory:
+            run=Path(directory)/"run";run.mkdir()
+            self.write(run/"raw_points.csv", ["scenario","frame","received_monotonic"], [])
+            for rows,message in [([["X",1,1],["X",1,1]],"Ambiguous"),
+                                 ([["X",1,"nan"]],"Nonfinite"),
+                                 ([["X",1,1],["X",2,""]],"Mixed")]:
+                self.write(run/"frame_diagnostics.csv", ["scenario","frame","received_monotonic"],rows)
+                with self.assertRaisesRegex(ValueError,message):
+                    load_capture(run,expected_frame_period=.1)
+
     def write(self, path, header, rows):
         with path.open("w", newline="", encoding="utf-8") as f:
             writer=csv.writer(f); writer.writerow(header); writer.writerows(rows)
