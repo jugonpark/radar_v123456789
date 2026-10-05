@@ -28,6 +28,18 @@ python raspberry_pi/pi_radar_gui.py
 
 The default CFG is `profile_3d_aop.cfg`; pass `--cfg profile_3d_aop_robot_clutter_on.cfg` for the experimental profile. Object logs go to `./logs`; raw logging is off unless `--raw-log` is supplied. SSH sessions without `DISPLAY` should use headless mode.
 
+## Hand detection diagnostics
+
+The Pi starts with `--profile BALANCED`. `STRICT` retains the earlier 0.15–0.90 m, SNR 10 dB, two-point, 3/3 behavior. `BALANCED` detects and tracks from 0.15–1.50 m with SNR 8 dB, one-point candidates and 2/3 persistence; threat risk remains inside 0.90 m. A two-frame candidate reaches high confidence only when representative Doppler and measured distance trend both show approach. `DIAGNOSTIC` accepts missing SNR for observation but never selects a target. These are software tuning starting points, not verified hand-detection thresholds.
+
+For a short labeled hand test, run:
+
+```bash
+python raspberry_pi/pi_radar_main.py --profile BALANCED --verbose --diag-log --raw-log
+```
+
+Record 10 seconds empty, then a stationary hand, slow approach, fast approach, one quick wave and retreat. `--diag-log` writes one row per frame with stage survival and reject counts. `--raw-log` writes all points and should only be used for short tests. The Pi GUI shows tentative objects by default; a single-point candidate is a small marker and never immediately becomes a threat. The headless summary shows moving points, clusters, tentative objects and confirmed objects so a missing target can be traced to its stage. Compare profiles with `--profile STRICT` or `--profile DIAGNOSTIC` using the same motion sequence.
+
 ## Ports, udev and service
 
 ```bash

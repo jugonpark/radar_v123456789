@@ -22,6 +22,8 @@ def build_parser():
     p.add_argument("--telemetry-host", default="127.0.0.1"); p.add_argument("--telemetry-port", type=int, default=8890)
     p.add_argument("--telemetry-hz", type=float, default=10.0); p.add_argument("--no-telemetry", action="store_true")
     p.add_argument("--raw-log", action="store_true"); p.add_argument("--verbose", action="store_true")
+    p.add_argument("--diag-log", action="store_true", help="write one diagnostic CSV row per frame")
+    p.add_argument("--profile", choices=("BALANCED", "STRICT", "DIAGNOSTIC"), default="BALANCED")
     return p
 
 
@@ -31,8 +33,9 @@ def main(argv=None):
     config = PiConfig(cfg_path=Path(args.cfg), log_dir=Path(args.log_dir), telemetry_host=args.telemetry_host,
                       telemetry_port=args.telemetry_port, telemetry_hz=args.telemetry_hz, raw_logging=args.raw_log)
     runtime = RadarRuntime(config, no_auto_port=args.no_auto_port, cli_override=args.cli_port, data_override=args.data_port,
-                           telemetry_enabled=not args.no_telemetry)
-    print(f"GRISE Radar Pi | CFG={config.cfg_path} CLI={runtime.cli_port} DATA={runtime.data_port} source={runtime.port_source} telemetry={not args.no_telemetry} raw={args.raw_log}")
+                           telemetry_enabled=not args.no_telemetry, profile=args.profile,
+                           diagnostic_logging=args.diag_log)
+    print(f"GRISE Radar Pi | profile={args.profile} CFG={config.cfg_path} CLI={runtime.cli_port} DATA={runtime.data_port} source={runtime.port_source} telemetry={not args.no_telemetry} raw={args.raw_log}")
     stopping = {"value": False}
     def stop_handler(_signum, _frame):
         stopping["value"] = True
@@ -49,7 +52,10 @@ def main(argv=None):
                     now = time.monotonic()
                     if now - last_report >= 1.0:
                         target = 1 if result.get("target") else 0
-                        print(f"[RADAR] FPS={runtime.frame_count / max(now-runtime.start_monotonic, 1e-6):.1f} frame={parsed['frame']} health={runtime.health} raw={result['counts']['raw']} roi={result['counts']['roi']} obj={len(result['objects'])} target={target} risk={result.get('target',{}).get('risk','N/A') if result.get('target') else 'N/A'}")
+                        c = result["counts"]
+                        print(f"[RADAR] FPS={runtime.frame_count / max(now-runtime.start_monotonic, 1e-6):.1f} frame={parsed['frame']} health={runtime.health} raw={c['raw']} roi={c['roi']} moving={c['moving']} approach={c['approaching']} clusters={c['clusters']} tentative={c['tentative']} confirmed={c['confirmed']} target={target} risk={result['target']['risk'] if result.get('target') else 'N/A'}")
+                        if args.verbose:
+                            print(f"[RADAR DIAG] range_drop={c['reject_range']} fov_drop={c['reject_fov']} snr_drop={c['reject_snr']} snr_missing={c['snr_missing']} snr_min/med/max={c['snr_min']}/{c['snr_median']}/{c['snr_max']} static={c['static']} recede={c['receding']} single={c['single_point_clusters']} matched={c['track_matched']} new={c['track_new']} high={c['high_confidence']}")
                         last_report = now
                 runtime.check_health()
             except Exception as exc:

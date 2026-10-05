@@ -23,3 +23,7 @@ The runtime writes object CSV by default and raw point CSV only when enabled. Ob
 ## Verification boundary
 
 Unit and mock-serial tests verify software behavior. Actual CLI acknowledgements, CP2105 interface names, udev rules, USB reconnect, RF/TLV behavior, Pi resource usage and robot motion require hardware testing.
+
+## Detection sensitivity revision
+
+Pi `BALANCED` uses 1.5 m detection and 0.9 m threat distance. It clusters moving points before classifying object direction so one mixed-sign point does not erase a small object. One-point clusters become tentative candidates; 2 of 3 detections confirm a track, while threat selection still requires approaching direction, high confidence, positive range trend and a risk within the threat range. Pi `DIAGNOSTIC` admits missing SNR solely for observation and suppresses target selection. `STRICT` retains Windows defaults and its prior point-direction clustering order. Per-frame reject counters and optional diagnostics CSV show where detections disappear. These parameters require labeled hand tests on the Pi before they can be considered calibrated.

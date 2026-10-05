@@ -44,9 +44,15 @@ class PiTests(unittest.TestCase):
         cfg = root / ".pi_test_cfg"; cfg.write_text("sensorStop\n")
         log_dir = root / ".pi_test_logs"
         c = PiConfig(cfg_path=cfg, log_dir=log_dir, telemetry_hz=10)
-        rt = RadarRuntime(c, source_factory=FakeSource, telemetry_factory=lambda *a, **k: TelemetrySender("h", 1, enabled=False))
+        rt = RadarRuntime(c, source_factory=FakeSource,
+                          telemetry_factory=lambda *a, **k: TelemetrySender("h", 1, enabled=False),
+                          diagnostic_logging=True)
         rt.connect(); self.assertEqual(rt.health, "OK")
         self.assertEqual(rt.processor.robot.state, "SETTLING")
+        observed = rt.process({"frame": 1, "points": [dict(x=0, y=.6, z=0, doppler=-.81, snr=12)]},
+                              rt.processor.robot.transition_time + .4)
+        self.assertEqual(observed["counts"]["tentative"], 1)
+        self.assertTrue(list(log_dir.glob("radar_frame_diagnostics_*.csv")))
         rt.last_frame_monotonic = 1.0
         self.assertEqual(rt.check_health(2.0), "STALE")
         rt.close()

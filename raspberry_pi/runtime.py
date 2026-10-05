@@ -1,9 +1,14 @@
 import csv
+import math
 import time
 from datetime import datetime
 from pathlib import Path
 
 from radar_processing import RadarProcessor
+try:
+    from .profiles import settings_for
+except ImportError:
+    from profiles import settings_for
 try:
     from .pi_config import PiConfig
     from .port_detection import detect_ports
@@ -19,19 +24,21 @@ except ImportError:
 
 
 HEALTH_BAD = {"STALE", "DISCONNECTED", "CONFIG_ERROR", "ERROR"}
+OBJECT_COLUMNS = ["timestamp", "frame", "robot_state", "object_id", "confirmed", "persistence", "confidence", "motion_state", "direction_state", "point_count", "centroid_x", "centroid_y", "centroid_z", "distance", "raw_distance", "angle", "doppler_velocity", "approaching_point_ratio", "range_rate_velocity", "ttc", "ttc_velocity_source", "risk", "pending_reason", "target_selected"]
 
 
 class RadarRuntime:
     def __init__(self, config=None, source_factory=RadarSerialSource, telemetry_factory=TelemetrySender,
                  motion_provider=None, no_auto_port=False, cli_override=None, data_override=None,
-                 telemetry_enabled=True, raw_logging=None):
+                 telemetry_enabled=True, raw_logging=None, profile="BALANCED", diagnostic_logging=False):
         self.config = config or PiConfig()
         self.source_factory, self.telemetry_factory = source_factory, telemetry_factory
         self.motion = motion_provider or RobotMotionProvider()
         ports = detect_ports(no_auto_port, cli_override, data_override)
         self.cli_port, self.data_port, self.port_source = ports.cli, ports.data, ports.source
         self.health = "CONNECTING"
-        self.processor = RadarProcessor()
+        self.profile = profile.upper()
+        self.processor = RadarProcessor(settings_for(self.profile))
         self.source = None
         self.telemetry = telemetry_factory(self.config.telemetry_host, self.config.telemetry_port,
                                            self.config.telemetry_hz, telemetry_enabled)
@@ -43,6 +50,9 @@ class RadarRuntime:
         self.object_writer = None
         self.raw_file = None
         self.raw_writer = None
+        self.diagnostic_file = None
+        self.diagnostic_writer = None
+        self.diagnostic_logging = diagnostic_logging
         self.raw_logging = self.config.raw_logging if raw_logging is None else raw_logging
         self._open_logs()
 
@@ -51,11 +61,15 @@ class RadarRuntime:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.object_file = (self.config.log_dir / f"radar_objects_{stamp}.csv").open("w", newline="", encoding="utf-8")
         self.object_writer = csv.writer(self.object_file)
-        self.object_writer.writerow(["timestamp", "frame", "robot_state", "object_id", "confirmed", "persistence", "confidence", "motion_state", "direction_state", "point_count", "centroid_x", "centroid_y", "centroid_z", "distance", "angle", "doppler_velocity", "range_rate_velocity", "ttc", "ttc_velocity_source", "risk", "target_selected"])
+        self.object_writer.writerow(OBJECT_COLUMNS)
         if self.raw_logging:
             self.raw_file = (self.config.log_dir / f"radar_raw_{stamp}.csv").open("w", newline="", encoding="utf-8")
             self.raw_writer = csv.writer(self.raw_file)
-            self.raw_writer.writerow(["timestamp", "frame", "point_id", "x", "y", "z", "doppler", "snr", "noise"])
+            self.raw_writer.writerow(["timestamp", "frame", "point_id", "x", "y", "z", "distance", "angle", "doppler", "snr", "noise", "motion", "direction"])
+        if self.diagnostic_logging:
+            self.diagnostic_file = (self.config.log_dir / f"radar_frame_diagnostics_{stamp}.csv").open("w", newline="", encoding="utf-8")
+            self.diagnostic_writer = csv.writer(self.diagnostic_file)
+            self.diagnostic_writer.writerow(["timestamp", "frame", "raw", "valid", "reject_range", "reject_fov", "reject_snr", "snr_missing", "roi", "static", "moving", "approaching", "receding", "moving_clusters", "single_point_clusters", "multi_point_clusters", "track_matched", "track_new", "tentative", "confirmed", "high_confidence", "targets"])
 
     def connect(self):
         self.health = "CONFIGURING"
@@ -82,6 +96,8 @@ class RadarRuntime:
         moving = self.motion.is_moving()
         self.processor.set_moving(moving, received_monotonic)
         result = self.processor.process_frame(parsed["frame"], parsed["points"], received_monotonic)
+        if result.get("target") and result["target"].get("point_count", 0) == 0:
+            result["target"] = None
         if moving:
             result["target"] = None
         if self.health == "OK":
@@ -107,17 +123,32 @@ class RadarRuntime:
         wall = time.time()
         for obj in result["objects"]:
             x, y, z = obj["centroid"]
-            self.object_writer.writerow([wall, parsed["frame"], result["robot_state"], obj["id"], int(obj["confirmed"]), obj["persistence"], obj["confidence"], obj["motion_state"], obj["direction_state"], obj["point_count"], x, y, z, obj["distance"], obj["angle"], obj["doppler_velocity"], obj["range_rate_velocity"], obj["ttc"], obj["ttc_velocity_source"], obj["risk"], int(obj["target_selected"])])
+            self.object_writer.writerow([wall, parsed["frame"], result["robot_state"], obj["id"], int(obj["confirmed"]), obj["persistence"], obj["confidence"], obj["motion_state"], obj["direction_state"], obj["point_count"], x, y, z, obj["distance"], obj["raw_distance"], obj["angle"], obj["doppler_velocity"], obj["approaching_point_ratio"], obj["range_rate_velocity"], obj["ttc"], obj["ttc_velocity_source"], obj["risk"], obj["pending_reason"], int(obj["target_selected"])])
         self.object_file.flush()
+        if self.diagnostic_writer:
+            c = result["counts"]
+            self.diagnostic_writer.writerow([wall, parsed["frame"]] + [c[k] for k in ("raw", "valid", "reject_range", "reject_fov", "reject_snr", "snr_missing", "roi", "static", "moving", "approaching", "receding", "moving_clusters", "single_point_clusters", "multi_point_clusters", "track_matched", "track_new", "tentative", "confirmed", "high_confidence", "targets")])
+            self.diagnostic_file.flush()
         if self.object_file.tell() >= self.config.object_log_max_bytes:
             self.object_file.close()
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.object_file = (self.config.log_dir / f"radar_objects_{stamp}.csv").open("w", newline="", encoding="utf-8")
             self.object_writer = csv.writer(self.object_file)
-            self.object_writer.writerow(["timestamp", "frame", "robot_state", "object_id", "confirmed", "persistence", "confidence", "motion_state", "direction_state", "point_count", "centroid_x", "centroid_y", "centroid_z", "distance", "angle", "doppler_velocity", "range_rate_velocity", "ttc", "ttc_velocity_source", "risk", "target_selected"])
+            self.object_writer.writerow(OBJECT_COLUMNS)
         if self.raw_writer:
             for i, p in enumerate(parsed["points"]):
-                self.raw_writer.writerow([wall, parsed["frame"], i, p.get("x"), p.get("y"), p.get("z"), p.get("doppler"), p.get("snr"), p.get("noise")])
+                try:
+                    x, y, z = float(p["x"]), float(p["y"]), float(p["z"])
+                    distance = math.sqrt(x*x+y*y+z*z)
+                    angle = math.degrees(math.atan2(x,y))
+                    speed = self.processor.settings.approach_sign * float(p["doppler"])
+                    deadband = self.processor.settings.doppler_deadband_mps
+                    motion = "MOVING" if abs(float(p["doppler"])) > deadband else "STATIC"
+                    direction = "APPROACHING" if speed > deadband else "RECEDING" if speed < -deadband else "UNKNOWN"
+                except (KeyError, TypeError, ValueError):
+                    distance = angle = None
+                    motion = direction = "UNKNOWN"
+                self.raw_writer.writerow([wall, parsed["frame"], i, p.get("x"), p.get("y"), p.get("z"), distance, angle, p.get("doppler"), p.get("snr"), p.get("noise"), motion, direction])
             self.raw_file.flush()
 
     def _send_telemetry(self, result, now):
@@ -130,6 +161,6 @@ class RadarRuntime:
         if self.source:
             self.source.close()
         self.telemetry.close()
-        for handle in (self.object_file, self.raw_file):
+        for handle in (self.object_file, self.raw_file, self.diagnostic_file):
             if handle:
                 handle.close()

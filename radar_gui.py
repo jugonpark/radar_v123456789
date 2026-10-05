@@ -191,8 +191,14 @@ class RadarApp(tk.Tk):
         try:
             values = {}
             integer = {"approach_sign", "min_cluster_points", "temporal_window", "temporal_required", "target_release_misses"}
+            boolean = {"require_snr", "diagnostic_only", "target_requires_threat", "cluster_before_direction", "fast_confidence_on_two_frames"}
             for name, var in self.settings_vars.items():
-                values[name] = int(var.get()) if name in integer else float(var.get())
+                if name in boolean:
+                    if var.get().lower() not in ("true", "false"):
+                        raise ValueError(f"{name} must be True or False")
+                    values[name] = var.get().lower() == "true"
+                else:
+                    values[name] = int(var.get()) if name in integer else float(var.get())
             settings = Settings(**values)
             settings.validate()
             fast_threshold = float(self.fast_threshold_var.get())
@@ -333,7 +339,7 @@ class RadarApp(tk.Tk):
     def _render(self, result):
         self.last_result = result
         counts = result["counts"]
-        self.counter_var.set("  ".join(f"{key.upper()} {counts[key]}" for key in ("raw", "roi", "static", "moving", "approaching", "receding", "clusters", "confirmed", "threats")))
+        self.counter_var.set("  ".join(f"{key.upper()} {counts[key]}" for key in ("raw", "roi", "static", "moving", "approaching", "receding", "clusters", "tentative", "confirmed", "targets")))
         self.state_var.set(f"{result['robot_state']} / {result['processing']}")
         target = result["target"]
         ttc_text = "N/A" if target is None or target["ttc"] is None else f"{target['ttc']:.2f}s"
@@ -357,7 +363,8 @@ class RadarApp(tk.Tk):
             self.detail.insert("end", f"OBJ {obj['id']} {obj['motion_state']}/{obj['direction_state']}  {obj['confidence']}\n"
                                f"  Dist {obj['distance']:.2f}m Angle {obj['angle']:+.1f}° Points {obj['point_count']}\n"
                                f"  Dop {obj['doppler_velocity']:.2f}m/s Range {obj['range_rate_velocity']}m/s\n"
-                               f"  Persist {obj['persistence']}/{self.processor.settings.temporal_window} TTC {obj['ttc']} ({obj['ttc_velocity_source']}) Risk {obj['risk']}\n")
+                               f"  Persist {obj['persistence']}/{self.processor.settings.temporal_window} TTC {obj['ttc']} ({obj['ttc_velocity_source']}) Risk {obj['risk']}\n"
+                               f"  Raw dist {obj['raw_distance']:.2f}m Approach ratio {obj.get('approaching_point_ratio', 0):.2f} Pending {obj.get('pending_reason', '-')}\n")
         self._draw()
 
     def _draw(self):
@@ -387,7 +394,8 @@ class RadarApp(tk.Tk):
                 continue
             x, y = cx + obj["centroid"][0] * scale, oy - obj["centroid"][1] * scale
             color = "#e15759" if obj["target_selected"] else "#67b7dc" if obj["confirmed"] else "#b0aee8"
-            c.create_oval(x-10, y-10, x+10, y+10, fill=color, outline="white" if obj["target_selected"] else "")
+            radius = 5 if obj["point_count"] == 1 and not obj["confirmed"] else 10
+            c.create_oval(x-radius, y-radius, x+radius, y+radius, fill=color, outline="white" if obj["target_selected"] else "")
             c.create_text(x+13, y-10, text=f"OBJ {obj['id']} {obj['distance']:.2f}m", fill="white", anchor="w")
 
     def _open_object_log(self):
