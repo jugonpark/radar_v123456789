@@ -1,0 +1,34 @@
+import unittest
+from tools.radar_track_analysis import TrackAnalysis, false_positive_diagnostics
+
+
+class TrackAnalysisTests(unittest.TestCase):
+    def test_fragmentation_and_comparison_and_false_positive(self):
+        a = TrackAnalysis(1.0)
+        for frame in range(4):
+            obj = dict(id=frame, raw_distance=.7, angle=0, confidence="HIGH", fast_approach_candidate=True,
+                       robust_range_rate=.8, raw_doppler_median=-.8, approach_doppler_median=.8)
+            a.add(frame, 1+frame*.1, dict(objects=[obj], target=obj, legacy_target=None, counts=dict(track_new=1)))
+        s = a.summary()
+        self.assertEqual(s["legacy_target_fraction"], 0)
+        self.assertEqual(s["legacy_high_fraction"], 1)
+        self.assertEqual(s["fast_candidate_fraction"], 1)
+        self.assertEqual(s["max_consecutive_fast_frames"], 4)
+        self.assertEqual(s["track_fragmentation_estimate"], 1)
+        self.assertIn("TRACK_MATCHING_MAY_BE_TOO_STRICT", s["diagnostics"])
+        self.assertEqual(len(false_positive_diagnostics("SCENE_4_RECEDE", a)), 4)
+        self.assertEqual(false_positive_diagnostics("SCENE_3_FAST_APPROACH", a), [])
+
+    def test_representatives_and_latency(self):
+        a = TrackAnalysis(4)
+        for i, d in enumerate([1,.9,.8]):
+            a.add(i, 4+i*.1, dict(objects=[dict(id=1, raw_distance=d, angle=i, robust_range_rate=1,
+                fast_approach_candidate=i==2, consecutive_distance_decreases=i)], target=None, counts={}))
+        s=a.summary()
+        self.assertAlmostEqual(s["first_detection_latency_from_action_start"], .2)
+        self.assertEqual(s["longest_track"]["lifetime_frames"], 3)
+        self.assertAlmostEqual(s["largest_closing_track"]["total_distance_change"], -.2)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -69,3 +69,8 @@ The checker sends no telemetry; an independent UDP receiver is available as
 `python tools/pi_radar_udp_probe.py --port 8890`.
 
 `SOFTWARE_VERIFIED`: unit tests, mock serial lifecycle, port selection, telemetry schema/rate limit, stale/moving fail-safe, import and syntax checks. `HARDWARE_TEST_REQUIRED`: actual IWR6843 CLI responses, CP2105 interface labels, udev symlinks, 921600 DATA stream, USB reconnect, CPU/RAM load and motor integration.
+
+
+## V2 track diagnostics and offline replay
+
+See [Track Fast Path V2](docs/RADAR_FAST_PATH_V2.md) for Windows/Pi commands, recorded ACTION_START, full/action-window comparisons and offline threshold tables. Use `--action-window 2 --raw-log --diag-log` with the interactive checker. Thresholds are EXPERIMENTAL and HARDWARE_TUNING_REQUIRED; OBSERVE retains baseline targets. Replay does not validate sensor hardware.

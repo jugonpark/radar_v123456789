@@ -50,9 +50,15 @@ class HardwareCheckTests(unittest.TestCase):
     def test_sign_agreement_mismatch_and_unknown(self):
         fast = self.scene("SCENE_3_FAST_APPROACH", [1.2, .8, .4], -.8)
         recede = self.scene("SCENE_4_RECEDE", [.3, .6, .9], .8)
+        def evidence(first, last, doppler):
+            return dict(lifetime_frames=3, angle_span=0, raw_doppler_median=doppler, total_distance_change=last-first)
+        fast["full_capture"]["tracks"] = [evidence(1.2,.4,-.8)]
+        recede["full_capture"]["tracks"] = [evidence(.3,.9,.8)]
         self.assertEqual(sign_check([fast, recede], -1)["status"], "PASS")
         self.assertTrue(sign_check([fast, recede], 1)["possible_sign_mismatch"])
         self.assertEqual(sign_check([fast], -1)["status"], "UNKNOWN")
+        fast["full_capture"]["tracks"] = []
+        self.assertEqual(sign_check([fast, recede], -1)["status"], "UNKNOWN")
 
     def test_target_zero_does_not_fail_transport(self):
         result = self.scene("SCENE_1_STATIC_HAND", [.6]*3, 0)

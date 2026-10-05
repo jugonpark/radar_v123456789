@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tools.radar_track_analysis import TrackAnalysis, TRACK_COLUMNS, track_csv_row, false_positive_diagnostics, scenario_assessment
 from radar_processing import RadarProcessor
 from raspberry_pi.port_detection import detect_ports
 from raspberry_pi.profiles import settings_for
@@ -46,8 +47,9 @@ def describe(values):
 
 
 class Capture:
-    def __init__(self, name):
+    def __init__(self, name, action_start=None):
         self.name = name
+        self.tracks = TrackAnalysis(action_start)
         self.times, self.frames, self.frame_distances = [], [], []
         self.values = {k: [] for k in ("x", "y", "z", "distance", "angle", "doppler", "snr")}
         self.counts = Counter()
@@ -57,6 +59,7 @@ class Capture:
         self.track_ids = set()
 
     def add(self, parsed, received, result, processor_ms, software_ms):
+        self.tracks.add(parsed["frame"], received, result)
         self.times.append(received)
         self.frames.append(parsed["frame"])
         distances = []
@@ -110,7 +113,7 @@ class Capture:
                     out_of_order=out_of_order, raw_points_per_frame=describe(self.raw_counts),
                     raw_statistics={k: describe(v) for k, v in self.values.items()}, stages=stages,
                     largest_rejection_stage=rejection if self.counts[rejection] else "NONE",
-                    distance_slope_mps=slope, range_rate_mps=describe(self.range_rates),
+                    full_capture=self.tracks.summary(), whole_cloud_distance_slope=slope, distance_slope_mps=slope, range_rate_mps=describe(self.range_rates),
                     processor_ms=describe(self.processor_ms), software_ms=describe(self.software_ms),
                     target_frame_fraction=self.target_frames/n if n else 0,
                     object_frame_fraction=self.object_frames/n if n else 0,
@@ -123,17 +126,19 @@ def sign_check(scenarios, approach_sign):
     fast, recede = by_name.get("SCENE_3_FAST_APPROACH"), by_name.get("SCENE_4_RECEDE")
     if not fast or not recede:
         return dict(status="UNKNOWN", reason="Requires FAST_APPROACH and RECEDE observations")
-    # Exclude static Doppler for sign evidence; keep unfiltered full raw statistics separately.
-    f, r = fast.get("moving_doppler_median"), recede.get("moving_doppler_median")
-    fs, rs = fast["distance_slope_mps"], recede["distance_slope_mps"]
-    if any(v is None for v in (f, r, fs, rs)) or abs(f) < .1 or abs(r) < .1 or abs(fs) < .02 or abs(rs) < .02:
-        return dict(status="UNKNOWN", reason="Insufficient radial motion evidence")
-    trend_ok = fs < 0 and rs > 0
-    sign_ok = f * approach_sign > 0 and r * approach_sign < 0
-    return dict(status="PASS" if trend_ok and sign_ok else "WARN",
-                possible_sign_mismatch=trend_ok and not sign_ok,
-                reason="Scene-level agreement only; reflections may confound attribution",
-                fast_doppler=f, recede_doppler=r, fast_slope=fs, recede_slope=rs)
+    def representative(scene, closing):
+        tracks = scene.get("action_window", scene.get("full_capture", {})).get("tracks", [])
+        usable = [t for t in tracks if t["lifetime_frames"] >= 2 and t["angle_span"] <= 25 and
+                  t.get("raw_doppler_median") is not None and abs(t["total_distance_change"]) > .02]
+        return (min if closing else max)(usable, key=lambda t:t["total_distance_change"], default=None)
+    f, r = representative(fast, True), representative(recede, False)
+    if not f or not r:
+        return dict(status="UNKNOWN", reason="Insufficient persistent moving track evidence; whole-cloud slope excluded")
+    trend_ok = f["total_distance_change"] < 0 and r["total_distance_change"] > 0
+    sign_ok = f["raw_doppler_median"]*approach_sign > .1 and r["raw_doppler_median"]*approach_sign < -.1
+    return dict(status="PASS" if trend_ok and sign_ok else "WARN", possible_sign_mismatch=trend_ok and not sign_ok,
+                reason="Track range trend plus object Doppler; track identity is not labelled hand ground truth", fast_track=f, recede_track=r)
+
 
 
 def classify(stream, scenarios, expected_fps, tolerance, cli_ok, port_ok, approach_sign):
@@ -143,7 +148,7 @@ def classify(stream, scenarios, expected_fps, tolerance, cli_ok, port_ok, approa
     fps = frames/duration if duration else 0
     continuity = sum(s["frame_gaps"] + s["duplicates"] + s["out_of_order"] for s in scenarios)
     sign = sign_check(scenarios, approach_sign)
-    stream_status = "FAIL" if not frames else "WARN" if errors else "PASS"
+    stream_status = "FAIL" if not frames else "WARN" if errors or stream.get("resyncs", 0) else "PASS"
     stability = "PASS" if frames and not continuity and abs(fps-expected_fps) <= expected_fps*tolerance else "WARN"
     raw_count = sum(s["raw_statistics"]["distance"]["count"] for s in scenarios)
     indexed = {s["name"]: s for s in scenarios}
@@ -181,13 +186,14 @@ def main(argv=None):
     parser.add_argument("--duration", type=float, default=30, help="Seconds per scenario")
     parser.add_argument("--expected-fps", type=float, help="Defaults to frameCfg period in CFG")
     parser.add_argument("--fps-tolerance", type=float, default=.2)
+    parser.add_argument("--action-window", type=float, default=2.0)
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--raw-log", action="store_true")
     parser.add_argument("--diag-log", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "logs/hardware_test")
     args = parser.parse_args(argv)
-    if args.duration <= 0 or not math.isfinite(args.duration) or not 0 <= args.fps_tolerance < 1:
+    if args.action_window <= 0 or not math.isfinite(args.action_window) or args.duration <= 0 or not math.isfinite(args.duration) or not 0 <= args.fps_tolerance < 1:
         parser.error("duration must be finite and positive; tolerance must be in [0,1)")
     expected = args.expected_fps
     if expected is None:
@@ -221,7 +227,8 @@ def main(argv=None):
         w.writerow(columns)
         return w
     objects = writer("objects.csv", ["scenario", "frame", "received_monotonic", "object_json"])
-    scenes = writer("scenarios.csv", ["scenario", "start_wall", "duration", "frames"])
+    scenes = writer("scenarios.csv", ["scenario", "start_wall", "duration", "frames", "action_start_wall", "action_start_monotonic", "action_window"])
+    tracks = writer("track_diagnostics.csv", TRACK_COLUMNS)
     raw_columns = ["x", "y", "z", "distance", "angle", "doppler", "snr", "noise"]
     raw = writer("raw_points.csv", ["scenario", "frame", "received_monotonic", *raw_columns]) if args.raw_log else None
     diag = writer("frame_diagnostics.csv", ["scenario", "frame", "received_monotonic", *STAGES, "processor_ms"]) if args.diag_log else None
@@ -242,12 +249,13 @@ def main(argv=None):
                 for number in (3, 2, 1):
                     print(number, flush=True)
                     time.sleep(1)
-                print("START", flush=True)
             source.data.reset_input_buffer()
             processor.reset()
-            capture = Capture(name)
             start_wall = datetime.now().isoformat()
             started = last_print = time.monotonic()
+            print("ACTION_START", start_wall, started, flush=True)
+            capture = Capture(name, started)
+            action = Capture(name, started)
             try:
                 for parsed, received in source.frames(Deadline(args.duration)):
                     before = time.monotonic()
@@ -257,8 +265,15 @@ def main(argv=None):
                     software_ms = proc_ms + source.parse_seconds[-1]*1000
                     capture.add(parsed, received, result, proc_ms, software_ms)
                     all_capture.add(parsed, received, result, proc_ms, software_ms)
+                    in_action = 0 <= received-started <= args.action_window
+                    if in_action:
+                        action.add(parsed, received, result, proc_ms, software_ms)
+                    legacy = result.get("legacy_target", result.get("target"))
                     for obj in result["objects"]:
-                        objects.writerow([name, parsed["frame"], received, json.dumps(obj, allow_nan=False)])
+                        row = track_csv_row(name, "ACTION" if in_action else "HOLD", parsed["frame"], received, obj, legacy)
+                        tracks.writerow([row[k] for k in TRACK_COLUMNS])
+                    for obj in result["objects"]:
+                        objects.writerow([name, parsed["frame"], received, json.dumps({k:v for k,v in obj.items() if k not in ("distance_history", "raw_distance_history")}, allow_nan=False)])
                     if raw:
                         for p in parsed["points"]:
                             row = dict(p)
@@ -276,11 +291,15 @@ def main(argv=None):
             finally:
                 duration = time.monotonic()-started
                 summary = capture.summary(duration)
+                summary["action_window"] = action.tracks.summary()
+                summary["scenario_assessment"] = scenario_assessment(name, summary["action_window"])
+                summary["timing"] = dict(action_start_wall=start_wall, action_start_monotonic=started, source="RECORDED_ACTION_START", latency_scope="Scenario START, not actual hand motion onset")
+                summary["false_positive_diagnostics"] = false_positive_diagnostics(name, capture.tracks)
                 moving = [d for d in capture.values["doppler"] if abs(d) > settings.doppler_deadband_mps]
                 summary["moving_doppler_median"] = statistics.median(moving) if moving else None
                 results.append(summary)
                 all_intervals.extend(b-a for a, b in zip(capture.times, capture.times[1:]))
-                scenes.writerow([name, start_wall, duration, summary["frames"]])
+                scenes.writerow([name, start_wall, duration, summary["frames"], start_wall, started, args.action_window])
     except (Exception, KeyboardInterrupt) as exc:
         failure = f"{type(exc).__name__}: {exc}"
         print("TEST INTERRUPTED/FAILED:", failure)
@@ -311,8 +330,22 @@ def main(argv=None):
                   latency_scope="Host parser + RadarProcessor only, excludes RF capture/UART transfer/logging; intervals measure host delivery.")
     if failure and (failure.startswith("KeyboardInterrupt") or report["frame_count"]):
         report["sensor_status"] = "NEEDS_RETEST"
-    text = "=== RADAR HARDWARE VALIDATION ===\n" + "\n".join(f"{k:22} {v}" for k, v in report["checks"].items())
+    report["fast_approach_check"] = dict(status="PASS" if any(s["name"] == "SCENE_3_FAST_APPROACH" and s["action_window"]["fast_candidate_fraction"] > 0 for s in results) and not any(s["false_positive_diagnostics"] for s in results) else "WARN", reason="Track candidate evidence within recorded action window; requires repeated labelled hardware trials", scenarios={s["name"]:dict(fast_fraction=s["action_window"]["fast_candidate_fraction"], legacy_fraction=s["action_window"]["legacy_target_fraction"]) for s in results})
+    report["checks"]["FAST APPROACH"] = report["fast_approach_check"]["status"]
+    report["check_reasons"] = {
+        "FAST APPROACH": report["fast_approach_check"],
+        "USB/PORT": dict(interface_labels_verified=labels_verified, mapping=ports.source),
+        "CLI CONFIG": dict(prompt_only_ack=sum(r["status"] == "PROMPT" for r in source.command_results), sent_commands=len(source.command_results), configuration_complete=cli_ok),
+        "DATA STREAM": {k:source.stream_stats.get(k, 0) for k in ("parsed_frames", "invalid_lengths", "resyncs", "parse_failures", "point_count_mismatches", "truncated_tlv_envelopes")},
+        "TLV PARSE": {k:source.stream_stats.get(k, 0) for k in ("parse_failures", "point_count_mismatches", "truncated_tlv_envelopes")},
+        "FRAME STABILITY": dict(expected_fps=expected, measured_fps=report["fps"], gaps=report["frame_gaps"], duplicates=sum(s["duplicates"] for s in results), out_of_order=sum(s["out_of_order"] for s in results))}
+    text = "=== RADAR HARDWARE VALIDATION ===\n" + "\n".join(f"{k:22} {v}\nreason: {json.dumps(report['check_reasons'].get(k, {'assessment':report['approach_sign_check']}))}" for k, v in report["checks"].items())
     text += f"\nSENSOR STATUS: {report['sensor_status']}\nPROCESSING STATUS: {report['processing_status']}\n"
+    for scene in results:
+        for phase in ("full_capture", "action_window"):
+            text += f"{scene['name']} {phase}: {json.dumps(scene[phase])}\n"
+        for evidence in scene["false_positive_diagnostics"]:
+            text += json.dumps(evidence) + "\n"
     text += json.dumps(report, indent=2, allow_nan=False)
     (output/"summary.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     (output/"test_report.txt").write_text(text, encoding="utf-8")
