@@ -62,4 +62,10 @@ Run `bash scripts/setup_pi.sh` for the guided apt, dialout, venv and dependency 
 
 ## Verification boundary
 
+For isolated transport, raw-point characterization and interactive hand scenarios,
+see [Hardware validation procedure](docs/RADAR_HARDWARE_TEST.md). Start with
+`python tools/pi_radar_hardware_check.py --interactive --duration 10 --raw-log --diag-log`.
+The checker sends no telemetry; an independent UDP receiver is available as
+`python tools/pi_radar_udp_probe.py --port 8890`.
+
 `SOFTWARE_VERIFIED`: unit tests, mock serial lifecycle, port selection, telemetry schema/rate limit, stale/moving fail-safe, import and syntax checks. `HARDWARE_TEST_REQUIRED`: actual IWR6843 CLI responses, CP2105 interface labels, udev symlinks, 921600 DATA stream, USB reconnect, CPU/RAM load and motor integration.
